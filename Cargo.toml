@@ -1,0 +1,53 @@
+[package]
+name = "lambdaform"
+version = "0.1.0"
+edition = "2021"
+description = "Terraform-native local Lambda emulator"
+license = "MIT"
+repository = "https://github.com/connerverret/lambdaform"
+keywords = ["aws", "lambda", "terraform", "serverless", "local-development"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# HTTP Server
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# HCL Parsing
+hcl-rs = "0.18"
+
+# File watching
+notify = "6"
+notify-debouncer-mini = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+regex = "1"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+
+[[bin]]
+name = "lambdaform"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true
