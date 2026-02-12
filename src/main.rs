@@ -149,11 +149,45 @@ fn cmd_invoke(
     Ok(())
 }
 
-fn cmd_config(json: bool, dir: PathBuf) -> anyhow::Result<()> {
-    println!("Parsing config from: {}", dir.display());
-    println!("JSON output: {}", json);
-    println!("\n⚠️  Not yet implemented - this is the MVP skeleton");
-
+fn cmd_config(json_output: bool, dir: PathBuf) -> anyhow::Result<()> {
+    let config = parser::parse_terraform_dir(&dir)?;
+    
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&config)?);
+    } else {
+        println!("📂 Parsed from: {}\n", dir.display());
+        
+        if config.functions.is_empty() {
+            println!("⚠️  No Lambda functions found");
+        } else {
+            println!("📦 Lambda Functions ({}):", config.functions.len());
+            for f in &config.functions {
+                println!("   • {} ({:?})", f.function_name, f.runtime);
+                println!("     Handler: {}", f.handler);
+                println!("     Timeout: {}s, Memory: {}MB", f.timeout, f.memory_size);
+                if !f.environment.is_empty() {
+                    println!("     Env vars: {:?}", f.environment.keys().collect::<Vec<_>>());
+                }
+            }
+        }
+        
+        println!();
+        
+        if config.gateways.is_empty() {
+            println!("⚠️  No API Gateways found");
+        } else {
+            println!("🌐 API Gateways ({}):", config.gateways.len());
+            for gw in &config.gateways {
+                println!("   • {} ({:?})", gw.name, gw.api_type);
+                if !gw.routes.is_empty() {
+                    for route in &gw.routes {
+                        println!("     {:?} {} → {}", route.method, route.path, route.function_resource);
+                    }
+                }
+            }
+        }
+    }
+    
     Ok(())
 }
 
