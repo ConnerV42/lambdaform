@@ -5,10 +5,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 use crate::config::{LambdaConfig, Runtime};
 

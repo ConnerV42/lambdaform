@@ -10,7 +10,6 @@ use axum::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::config::LambdaformConfig;
 use crate::router::Router as LambdaRouter;

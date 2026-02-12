@@ -42,20 +42,21 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
     
     // Extract resource blocks
     for block in body.blocks() {
-        if block.identifier().as_str() == "resource" {
-            let labels: Vec<_> = block.labels().collect();
+        let identifier = block.identifier.to_string();
+        if identifier == "resource" {
+            let labels: Vec<String> = block.labels.iter().map(|l| label_to_string(l)).collect();
             if labels.len() >= 2 {
-                let resource_type = labels[0].as_str();
-                let resource_name = labels[1].as_str();
+                let resource_type = &labels[0];
+                let resource_name = &labels[1];
                 
-                match resource_type {
+                match resource_type.as_str() {
                     "aws_lambda_function" => {
-                        if let Some(lambda) = parse_lambda_function(resource_name, block)? {
+                        if let Some(lambda) = parse_lambda_function(&resource_name, block)? {
                             config.functions.push(lambda);
                         }
                     }
                     "aws_api_gateway_rest_api" => {
-                        if let Some(api) = parse_api_gateway_rest(resource_name, block)? {
+                        if let Some(api) = parse_api_gateway_rest(&resource_name, block)? {
                             config.gateways.push(api);
                         }
                     }
@@ -71,7 +72,7 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
 
 /// Parse aws_lambda_function resource
 fn parse_lambda_function(name: &str, block: &hcl::Block) -> Result<Option<LambdaConfig>> {
-    let body = block.body();
+    let body = &block.body;
     
     // Extract required attributes
     let function_name = get_string_attr(body, "function_name")
@@ -122,7 +123,7 @@ fn parse_lambda_function(name: &str, block: &hcl::Block) -> Result<Option<Lambda
 
 /// Parse aws_api_gateway_rest_api resource
 fn parse_api_gateway_rest(name: &str, block: &hcl::Block) -> Result<Option<ApiGatewayConfig>> {
-    let body = block.body();
+    let body = &block.body;
     
     let api_name = get_string_attr(body, "name")
         .unwrap_or_else(|| name.to_string());
@@ -135,12 +136,20 @@ fn parse_api_gateway_rest(name: &str, block: &hcl::Block) -> Result<Option<ApiGa
     }))
 }
 
+/// Convert a BlockLabel to a String
+fn label_to_string(label: &hcl::structure::BlockLabel) -> String {
+    match label {
+        hcl::structure::BlockLabel::Identifier(ident) => ident.to_string(),
+        hcl::structure::BlockLabel::String(s) => s.clone(),
+    }
+}
+
 /// Get a string attribute from HCL body
 fn get_string_attr(body: &hcl::Body, name: &str) -> Option<String> {
     body.attributes()
-        .find(|attr| attr.key().as_str() == name)
+        .find(|attr| attr.key.to_string() == name)
         .and_then(|attr| {
-            match attr.expr() {
+            match &attr.expr {
                 hcl::Expression::String(s) => Some(s.to_string()),
                 _ => None,
             }
@@ -150,9 +159,9 @@ fn get_string_attr(body: &hcl::Body, name: &str) -> Option<String> {
 /// Get a number attribute from HCL body
 fn get_number_attr(body: &hcl::Body, name: &str) -> Option<u32> {
     body.attributes()
-        .find(|attr| attr.key().as_str() == name)
+        .find(|attr| attr.key.to_string() == name)
         .and_then(|attr| {
-            match attr.expr() {
+            match &attr.expr {
                 hcl::Expression::Number(n) => n.as_u64().map(|v| v as u32),
                 _ => None,
             }
@@ -165,11 +174,12 @@ fn extract_environment(body: &hcl::Body) -> HashMap<String, String> {
     
     // Look for environment block
     for block in body.blocks() {
-        if block.identifier().as_str() == "environment" {
+        let identifier = block.identifier.to_string();
+        if identifier == "environment" {
             // Look for variables attribute inside
-            for attr in block.body().attributes() {
-                if attr.key().as_str() == "variables" {
-                    if let hcl::Expression::Object(obj) = attr.expr() {
+            for attr in block.body.attributes() {
+                if attr.key.to_string() == "variables" {
+                    if let hcl::Expression::Object(obj) = &attr.expr {
                         for (key, value) in obj.iter() {
                             if let (hcl::ObjectKey::Identifier(k), hcl::Expression::String(v)) = (key, value) {
                                 env.insert(k.to_string(), v.to_string());

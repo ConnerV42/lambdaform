@@ -1,8 +1,7 @@
 //! File watcher for hot reload
 
-use notify::{Event, RecursiveMode, Watcher};
+use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent};
-use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
