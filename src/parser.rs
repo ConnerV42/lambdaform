@@ -31,6 +31,31 @@ pub fn parse_terraform_dir(dir: &Path) -> Result<LambdaformConfig> {
     Ok(config)
 }
 
+/// Intermediate structs for collecting API Gateway resources before resolving
+#[derive(Debug, Clone)]
+struct ApigwResource {
+    resource_name: String,
+    rest_api_ref: String,
+    parent_ref: String,
+    path_part: String,
+}
+
+#[derive(Debug, Clone)]
+struct ApigwMethod {
+    resource_name: String,
+    rest_api_ref: String,
+    resource_ref: String,
+    http_method: String,
+}
+
+#[derive(Debug, Clone)]
+struct ApigwIntegration {
+    rest_api_ref: String,
+    resource_ref: String,
+    http_method_ref: String,
+    lambda_uri_ref: Option<String>,
+}
+
 /// Parse a single .tf file
 fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
     let content = fs::read_to_string(path)
@@ -39,6 +64,10 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
     // Parse HCL
     let body: hcl::Body = hcl::from_str(&content)
         .with_context(|| format!("Failed to parse HCL in {}", path.display()))?;
+    
+    let mut apigw_resources: Vec<ApigwResource> = Vec::new();
+    let mut apigw_methods: Vec<ApigwMethod> = Vec::new();
+    let mut apigw_integrations: Vec<ApigwIntegration> = Vec::new();
     
     // Extract resource blocks
     for block in body.blocks() {
@@ -60,14 +89,160 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
                             config.gateways.push(api);
                         }
                     }
-                    // TODO: Parse other resource types
+                    "aws_api_gateway_resource" => {
+                        if let Some(r) = parse_apigw_resource(resource_name, block) {
+                            apigw_resources.push(r);
+                        }
+                    }
+                    "aws_api_gateway_method" => {
+                        if let Some(m) = parse_apigw_method(resource_name, block) {
+                            apigw_methods.push(m);
+                        }
+                    }
+                    "aws_api_gateway_integration" => {
+                        if let Some(i) = parse_apigw_integration(block) {
+                            apigw_integrations.push(i);
+                        }
+                    }
                     _ => {}
                 }
             }
         }
     }
     
+    // Resolve API Gateway routes from resource→method→integration chain
+    resolve_api_gateway_routes(config, &apigw_resources, &apigw_methods, &apigw_integrations);
+    
     Ok(())
+}
+
+/// Parse aws_api_gateway_resource
+fn parse_apigw_resource(name: &str, block: &hcl::Block) -> Option<ApigwResource> {
+    let body = &block.body;
+    Some(ApigwResource {
+        resource_name: name.to_string(),
+        rest_api_ref: get_traversal_attr(body, "rest_api_id").unwrap_or_default(),
+        parent_ref: get_traversal_attr(body, "parent_id").unwrap_or_default(),
+        path_part: get_string_attr(body, "path_part")?,
+    })
+}
+
+/// Parse aws_api_gateway_method
+fn parse_apigw_method(name: &str, block: &hcl::Block) -> Option<ApigwMethod> {
+    let body = &block.body;
+    Some(ApigwMethod {
+        resource_name: name.to_string(),
+        rest_api_ref: get_traversal_attr(body, "rest_api_id").unwrap_or_default(),
+        resource_ref: get_traversal_attr(body, "resource_id").unwrap_or_default(),
+        http_method: get_string_attr(body, "http_method")?,
+    })
+}
+
+/// Parse aws_api_gateway_integration
+fn parse_apigw_integration(block: &hcl::Block) -> Option<ApigwIntegration> {
+    let body = &block.body;
+    Some(ApigwIntegration {
+        rest_api_ref: get_traversal_attr(body, "rest_api_id").unwrap_or_default(),
+        resource_ref: get_traversal_attr(body, "resource_id").unwrap_or_default(),
+        http_method_ref: get_traversal_attr(body, "http_method").or_else(|| get_string_attr(body, "http_method")).unwrap_or_default(),
+        lambda_uri_ref: get_traversal_attr(body, "uri"),
+    })
+}
+
+/// Resolve the API Gateway resource chain into routes
+fn resolve_api_gateway_routes(
+    config: &mut LambdaformConfig,
+    resources: &[ApigwResource],
+    methods: &[ApigwMethod],
+    integrations: &[ApigwIntegration],
+) {
+    // Build resource name → path_part lookup
+    let resource_paths: HashMap<String, String> = resources
+        .iter()
+        .map(|r| (r.resource_name.clone(), r.path_part.clone()))
+        .collect();
+    
+    // For each integration, find the matching method and resource to build a route
+    for integration in integrations {
+        // Extract lambda function resource name from uri ref
+        // e.g., "aws_lambda_function.hello.invoke_arn" → "hello"
+        let lambda_resource = match &integration.lambda_uri_ref {
+            Some(uri) => extract_lambda_name_from_ref(uri),
+            None => continue,
+        };
+        
+        // Find the matching method by resource_ref
+        // resource_ref is like "aws_api_gateway_resource.hello.id" → "hello"
+        let apigw_resource_name = extract_resource_name_from_ref(&integration.resource_ref);
+        
+        let path_part = match resource_paths.get(&apigw_resource_name) {
+            Some(p) => p,
+            None => continue,
+        };
+        
+        // Find the method for this resource
+        let method = methods.iter().find(|m| {
+            extract_resource_name_from_ref(&m.resource_ref) == apigw_resource_name
+        });
+        
+        let http_method = match method {
+            Some(m) => parse_http_method(&m.http_method),
+            None => HttpMethod::Any,
+        };
+        
+        // Build the path (for now, simple single-level: /{path_part})
+        // TODO: Support nested resources by walking parent chain
+        let path = format!("/{}", path_part);
+        
+        let route = RouteConfig {
+            method: http_method,
+            path,
+            function_resource: lambda_resource,
+            authorizer: None,
+        };
+        
+        // Find the gateway and add the route
+        // For simplicity, add to first gateway (most common case)
+        if let Some(gateway) = config.gateways.first_mut() {
+            tracing::info!("Resolved route: {} {} → {}", 
+                route.method_str(), route.path, route.function_resource);
+            gateway.routes.push(route);
+        }
+    }
+}
+
+/// Extract resource name from a Terraform reference like "aws_lambda_function.hello.invoke_arn"
+fn extract_lambda_name_from_ref(ref_str: &str) -> String {
+    let parts: Vec<&str> = ref_str.split('.').collect();
+    if parts.len() >= 2 && parts[0] == "aws_lambda_function" {
+        parts[1].to_string()
+    } else {
+        ref_str.to_string()
+    }
+}
+
+/// Extract resource name from ref like "aws_api_gateway_resource.hello.id"
+fn extract_resource_name_from_ref(ref_str: &str) -> String {
+    let parts: Vec<&str> = ref_str.split('.').collect();
+    if parts.len() >= 2 {
+        parts[1].to_string()
+    } else {
+        ref_str.to_string()
+    }
+}
+
+fn parse_http_method(s: &str) -> HttpMethod {
+    match s.to_uppercase().as_str() {
+        "GET" => HttpMethod::Get,
+        "POST" => HttpMethod::Post,
+        "PUT" => HttpMethod::Put,
+        "PATCH" => HttpMethod::Patch,
+        "DELETE" => HttpMethod::Delete,
+        "OPTIONS" => HttpMethod::Options,
+        "HEAD" => HttpMethod::Head,
+        "ANY" => HttpMethod::Any,
+        _ => HttpMethod::Any,
+    }
 }
 
 /// Parse aws_lambda_function resource
@@ -142,6 +317,30 @@ fn label_to_string(label: &hcl::structure::BlockLabel) -> String {
         hcl::structure::BlockLabel::Identifier(ident) => ident.to_string(),
         hcl::structure::BlockLabel::String(s) => s.clone(),
     }
+}
+
+/// Get a traversal attribute as a dotted string (e.g., "aws_lambda_function.hello.invoke_arn")
+fn get_traversal_attr(body: &hcl::Body, name: &str) -> Option<String> {
+    body.attributes()
+        .find(|attr| attr.key.to_string() == name)
+        .and_then(|attr| {
+            match &attr.expr {
+                hcl::Expression::Traversal(traversal) => {
+                    let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                        .chain(traversal.operators.iter().map(|op| {
+                            match op {
+                                hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                                hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                                _ => String::new(),
+                            }
+                        }))
+                        .collect();
+                    Some(parts.join("."))
+                }
+                hcl::Expression::String(s) => Some(s.to_string()),
+                _ => None,
+            }
+        })
 }
 
 /// Get a string attribute from HCL body

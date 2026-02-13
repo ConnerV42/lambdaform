@@ -151,6 +151,21 @@ pub enum HttpMethod {
     Any,
 }
 
+impl RouteConfig {
+    pub fn method_str(&self) -> &str {
+        match self.method {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Put => "PUT",
+            HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
+            HttpMethod::Options => "OPTIONS",
+            HttpMethod::Head => "HEAD",
+            HttpMethod::Any => "ANY",
+        }
+    }
+}
+
 /// Authorizer configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizerConfig {

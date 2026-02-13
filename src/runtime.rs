@@ -101,7 +101,7 @@ impl FunctionExecutor {
         // Parse handler (e.g., "index.handler" -> file: index.js, function: handler)
         let (file, func) = parse_handler(&self.config.handler)?;
         
-        let handler_path = self.source_dir.join(format!("{}.js", file));
+        let handler_path = find_handler_file(&self.source_dir, file, "js")?;
         
         // Node.js bootstrap script (inline)
         let bootstrap = format!(
@@ -169,7 +169,7 @@ process.stdin.once('data', async (data) => {{
     async fn invoke_python(&self, payload: &serde_json::Value) -> Result<LambdaResponse> {
         let (file, func) = parse_handler(&self.config.handler)?;
         
-        let handler_path = self.source_dir.join(format!("{}.py", file));
+        let handler_path = find_handler_file(&self.source_dir, file, "py")?;
         
         let bootstrap = format!(
             r#"
@@ -229,6 +229,34 @@ except Exception as e:
         
         anyhow::bail!("No valid response from Lambda")
     }
+}
+
+/// Find handler file by searching common locations. Returns canonical (absolute) path.
+fn find_handler_file(source_dir: &std::path::Path, file: &str, ext: &str) -> Result<std::path::PathBuf> {
+    let filename = format!("{}.{}", file, ext);
+    
+    // Search order: root, src/, lib/, lambda/
+    let candidates = [
+        source_dir.join(&filename),
+        source_dir.join("src").join(&filename),
+        source_dir.join("lib").join(&filename),
+        source_dir.join("lambda").join(&filename),
+    ];
+    
+    for path in &candidates {
+        if path.exists() {
+            let canonical = path.canonicalize()
+                .with_context(|| format!("Failed to canonicalize {}", path.display()))?;
+            tracing::info!("Found handler at: {}", canonical.display());
+            return Ok(canonical);
+        }
+    }
+    
+    anyhow::bail!(
+        "Handler file '{}' not found. Searched: {}",
+        filename,
+        candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+    )
 }
 
 /// Parse handler string (e.g., "index.handler" -> ("index", "handler"))
