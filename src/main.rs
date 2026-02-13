@@ -38,6 +38,10 @@ enum Commands {
         /// Enable hot reload
         #[arg(long, default_value = "true")]
         watch: bool,
+
+        /// Verbose logging (show headers, bodies, debug info)
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     /// Invoke a Lambda function directly
@@ -74,18 +78,20 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Initialize logging
+    let cli = Cli::parse();
+
+    // Initialize logging — verbose flag sets DEBUG level
+    let verbose = matches!(&cli.command, Commands::Start { verbose: true, .. });
+    let default_level = if verbose { tracing::Level::DEBUG } else { tracing::Level::INFO };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+                .add_directive(default_level.into()),
         )
         .init();
 
-    let cli = Cli::parse();
-
     match cli.command {
-        Commands::Start { port, dir, watch } => {
+        Commands::Start { port, dir, watch, verbose: _ } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(cmd_start(port, dir, watch))
         }

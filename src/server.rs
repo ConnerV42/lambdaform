@@ -211,6 +211,29 @@ fn start_watcher(
     Ok(handle)
 }
 
+/// Format a duration in human-readable form
+fn format_duration(duration: std::time::Duration) -> String {
+    let ms = duration.as_secs_f64() * 1000.0;
+    if ms < 1.0 {
+        format!("{:.0}µs", duration.as_micros())
+    } else if ms < 1000.0 {
+        format!("{:.1}ms", ms)
+    } else {
+        format!("{:.2}s", duration.as_secs_f64())
+    }
+}
+
+/// Format body size in human-readable form
+fn format_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 /// Handle incoming HTTP requests
 async fn handle_request(
     method: Method,
@@ -220,9 +243,28 @@ async fn handle_request(
     State(state): State<Arc<AppState>>,
     body: Bytes,
 ) -> Response {
+    let request_start = std::time::Instant::now();
     let path = format!("/{}", path);
 
-    tracing::info!("{} {}", method, path);
+    // Build request info for logging
+    let query_str = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&"))
+    };
+
+    let body_size = body.len();
+    let content_type = headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+
+    tracing::info!("→ {} {}{}{}", method, path, query_str,
+        if body_size > 0 { format!(" [body: {}, type: {}]", format_bytes(body_size), content_type) } else { String::new() }
+    );
 
     // Convert method to our enum
     let http_method = match method {
@@ -243,7 +285,8 @@ async fn handle_request(
     let matched = match inner.router.match_request(&http_method, &path) {
         Some(m) => m,
         None => {
-            tracing::warn!("No route matched: {} {}", method, path);
+            let duration = request_start.elapsed();
+            tracing::warn!("← ⚠️ 404 {} {}{} [{}] no matching route", method, path, query_str, format_duration(duration));
             let body = serde_json::json!({
                 "message": format!("No route matched: {} {}", method, path),
                 "hint": "Run `lambdaform config` to see available routes"
@@ -301,13 +344,14 @@ async fn handle_request(
         match auth_executor.invoke_authorizer(auth_event).await {
             Ok(result) => {
                 if !result.is_authorized {
-                    tracing::warn!("🔒 Authorizer denied: {} {}", method, path);
+                    let duration = request_start.elapsed();
+                    tracing::warn!("← ⚠️ 401 {} {} [{}] authorizer denied", method, path, format_duration(duration));
                     let body = serde_json::json!({
                         "message": "Unauthorized",
                     });
                     return (StatusCode::UNAUTHORIZED, body.to_string()).into_response();
                 }
-                tracing::info!("🔓 Authorizer allowed: {} {}", method, path);
+                tracing::debug!("🔓 Authorizer allowed: {} {}", method, path);
             }
             Err(e) => {
                 tracing::error!("Authorizer error: {}", e);
@@ -321,10 +365,30 @@ async fn handle_request(
     }
 
     // Execute function
-    let executor = FunctionExecutor::new(function, state.source_dir.clone());
+    let executor = FunctionExecutor::new(function.clone(), state.source_dir.clone());
 
     match executor.invoke(event).await {
         Ok(response) => {
+            let duration = request_start.elapsed();
+            let status = StatusCode::from_u16(response.status_code).unwrap_or(StatusCode::OK);
+            let response_body = response.body.unwrap_or_default();
+            let response_size = response_body.len();
+
+            let status_icon = if status.is_success() { "✅" }
+                else if status.is_redirection() { "↪️" }
+                else if status.is_client_error() { "⚠️" }
+                else { "❌" };
+
+            tracing::info!("← {} {} {} {} [{}] → {}",
+                status_icon, status.as_u16(), method, path,
+                format_duration(duration), format_bytes(response_size)
+            );
+
+            // Log slow requests
+            if duration.as_millis() > 3000 {
+                tracing::warn!("🐢 Slow request: {} {} took {}", method, path, format_duration(duration));
+            }
+
             let mut builder = axum::response::Response::builder().status(response.status_code);
 
             if let Some(headers) = response.headers {
@@ -333,11 +397,11 @@ async fn handle_request(
                 }
             }
 
-            let body = response.body.unwrap_or_default();
-            builder.body(body.into()).unwrap()
+            builder.body(response_body.into()).unwrap()
         }
         Err(e) => {
-            tracing::error!("Lambda execution error: {}", e);
+            let duration = request_start.elapsed();
+            tracing::error!("← ❌ 500 {} {} [{}] error: {}", method, path, format_duration(duration), e);
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
