@@ -117,7 +117,7 @@ mod tests {
     fn test_ignore_patterns() {
         let event = DebouncedEvent {
             path: std::path::PathBuf::from("/project/node_modules/test.js"),
-            kind: None,
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
         };
         
         let ignore = vec!["node_modules".to_string()];
@@ -128,7 +128,7 @@ mod tests {
     fn test_tf_detection() {
         let event = DebouncedEvent {
             path: std::path::PathBuf::from("/project/main.tf"),
-            kind: None,
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
         };
         
         let change = process_event(&event, &[]);

@@ -76,3 +76,36 @@ resource "aws_api_gateway_integration" "post_echo" {
   integration_http_method = "POST"
   uri                     = aws_lambda_function.echo.invoke_arn
 }
+
+# Path parameter test
+resource "aws_lambda_function" "get_user" {
+  function_name = "get-user"
+  handler       = "users.handler"
+  runtime       = "nodejs20.x"
+  timeout       = 10
+  memory_size   = 128
+
+  filename = "lambda.zip"
+}
+
+resource "aws_api_gateway_resource" "users_id" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_rest_api.api.root_resource_id
+  path_part   = "users/{id}"
+}
+
+resource "aws_api_gateway_method" "get_user" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.users_id.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "get_user" {
+  rest_api_id             = aws_api_gateway_rest_api.api.id
+  resource_id             = aws_api_gateway_resource.users_id.id
+  http_method             = aws_api_gateway_method.get_user.http_method
+  type                    = "AWS_PROXY"
+  integration_http_method = "POST"
+  uri                     = aws_lambda_function.get_user.invoke_arn
+}
