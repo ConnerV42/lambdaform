@@ -175,7 +175,12 @@ async fn handle_request(
     let matched = match inner.router.match_request(&http_method, &path) {
         Some(m) => m,
         None => {
-            return (StatusCode::NOT_FOUND, "Route not found").into_response();
+            tracing::warn!("No route matched: {} {}", method, path);
+            let body = serde_json::json!({
+                "message": format!("No route matched: {} {}", method, path),
+                "hint": "Run `lambdaform config` to see available routes"
+            });
+            return (StatusCode::NOT_FOUND, body.to_string()).into_response();
         }
     };
 
