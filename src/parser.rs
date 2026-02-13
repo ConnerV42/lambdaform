@@ -56,6 +56,22 @@ struct ApigwIntegration {
     lambda_uri_ref: Option<String>,
 }
 
+/// HTTP API Gateway v2 intermediate structs
+#[derive(Debug, Clone)]
+struct Apigwv2Route {
+    resource_name: String,
+    api_ref: String,
+    route_key: String,
+    target_ref: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Apigwv2Integration {
+    resource_name: String,
+    api_ref: String,
+    lambda_uri_ref: Option<String>,
+}
+
 /// Parse a single .tf file
 fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
     let content = fs::read_to_string(path)
@@ -68,6 +84,8 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
     let mut apigw_resources: Vec<ApigwResource> = Vec::new();
     let mut apigw_methods: Vec<ApigwMethod> = Vec::new();
     let mut apigw_integrations: Vec<ApigwIntegration> = Vec::new();
+    let mut apigwv2_routes: Vec<Apigwv2Route> = Vec::new();
+    let mut apigwv2_integrations: Vec<Apigwv2Integration> = Vec::new();
     
     // Extract resource blocks
     for block in body.blocks() {
@@ -104,14 +122,32 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
                             apigw_integrations.push(i);
                         }
                     }
+                    "aws_apigatewayv2_api" => {
+                        if let Some(api) = parse_apigatewayv2_api(resource_name, block)? {
+                            config.gateways.push(api);
+                        }
+                    }
+                    "aws_apigatewayv2_route" => {
+                        if let Some(r) = parse_apigatewayv2_route(resource_name, block) {
+                            apigwv2_routes.push(r);
+                        }
+                    }
+                    "aws_apigatewayv2_integration" => {
+                        if let Some(i) = parse_apigatewayv2_integration(resource_name, block) {
+                            apigwv2_integrations.push(i);
+                        }
+                    }
                     _ => {}
                 }
             }
         }
     }
     
-    // Resolve API Gateway routes from resource→method→integration chain
+    // Resolve API Gateway v1 routes from resource→method→integration chain
     resolve_api_gateway_routes(config, &apigw_resources, &apigw_methods, &apigw_integrations);
+    
+    // Resolve API Gateway v2 routes from route→integration chain
+    resolve_apigatewayv2_routes(config, &apigwv2_routes, &apigwv2_integrations);
     
     Ok(())
 }
@@ -208,6 +244,119 @@ fn resolve_api_gateway_routes(
                 route.method_str(), route.path, route.function_resource);
             gateway.routes.push(route);
         }
+    }
+}
+
+/// Parse aws_apigatewayv2_api resource
+fn parse_apigatewayv2_api(name: &str, block: &hcl::Block) -> Result<Option<ApiGatewayConfig>> {
+    let body = &block.body;
+    let api_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+    
+    Ok(Some(ApiGatewayConfig {
+        resource_name: name.to_string(),
+        name: api_name,
+        api_type: ApiType::Http,
+        routes: Vec::new(),
+    }))
+}
+
+/// Parse aws_apigatewayv2_route resource
+fn parse_apigatewayv2_route(name: &str, block: &hcl::Block) -> Option<Apigwv2Route> {
+    let body = &block.body;
+    Some(Apigwv2Route {
+        resource_name: name.to_string(),
+        api_ref: get_traversal_attr(body, "api_id").unwrap_or_default(),
+        route_key: get_string_attr(body, "route_key")?,
+        target_ref: get_traversal_attr(body, "target").or_else(|| get_string_attr(body, "target")),
+    })
+}
+
+/// Parse aws_apigatewayv2_integration resource
+fn parse_apigatewayv2_integration(name: &str, block: &hcl::Block) -> Option<Apigwv2Integration> {
+    let body = &block.body;
+    Some(Apigwv2Integration {
+        resource_name: name.to_string(),
+        api_ref: get_traversal_attr(body, "api_id").unwrap_or_default(),
+        lambda_uri_ref: get_traversal_attr(body, "integration_uri"),
+    })
+}
+
+/// Resolve API Gateway v2 routes
+/// V2 is simpler: route_key = "GET /path" and target = "integrations/${integration_id}"
+fn resolve_apigatewayv2_routes(
+    config: &mut LambdaformConfig,
+    routes: &[Apigwv2Route],
+    integrations: &[Apigwv2Integration],
+) {
+    // Build integration name → lambda resource lookup
+    let integration_lambdas: HashMap<String, String> = integrations
+        .iter()
+        .filter_map(|i| {
+            let lambda_name = extract_lambda_name_from_ref(i.lambda_uri_ref.as_deref()?);
+            Some((i.resource_name.clone(), lambda_name))
+        })
+        .collect();
+    
+    for route in routes {
+        // Parse route_key: "GET /users/{id}" or "$default"
+        let (method, path) = parse_v2_route_key(&route.route_key);
+        
+        // Resolve target integration → lambda
+        // target is like "integrations/${aws_apigatewayv2_integration.name.id}"
+        // or via traversal: "aws_apigatewayv2_integration.name.id"
+        let lambda_resource = route.target_ref.as_ref().and_then(|target| {
+            // Try extracting integration name from the ref
+            let parts: Vec<&str> = target.split('.').collect();
+            if parts.len() >= 2 && parts[0] == "aws_apigatewayv2_integration" {
+                integration_lambdas.get(parts[1]).cloned()
+            } else {
+                // Try matching by iterating integrations with same api_ref
+                integrations.iter()
+                    .find(|i| {
+                        // Match by api_ref
+                        extract_resource_name_from_ref(&i.api_ref) == extract_resource_name_from_ref(&route.api_ref)
+                    })
+                    .and_then(|i| integration_lambdas.get(&i.resource_name).cloned())
+            }
+        });
+        
+        let lambda_resource = match lambda_resource {
+            Some(r) => r,
+            None => continue,
+        };
+        
+        let route_config = RouteConfig {
+            method,
+            path,
+            function_resource: lambda_resource.clone(),
+            authorizer: None,
+        };
+        
+        // Find the matching v2 gateway
+        let api_resource_name = extract_resource_name_from_ref(&route.api_ref);
+        let gateway = config.gateways.iter_mut().find(|g| {
+            g.resource_name == api_resource_name && g.api_type == ApiType::Http
+        });
+        
+        if let Some(gateway) = gateway {
+            tracing::info!("Resolved v2 route: {} {} → {}",
+                route_config.method_str(), route_config.path, lambda_resource);
+            gateway.routes.push(route_config);
+        }
+    }
+}
+
+/// Parse a v2 route key like "GET /users/{id}" into (HttpMethod, path)
+fn parse_v2_route_key(route_key: &str) -> (HttpMethod, String) {
+    if route_key == "$default" {
+        return (HttpMethod::Any, "/".to_string());
+    }
+    
+    let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
+    if parts.len() == 2 {
+        (parse_http_method(parts[0]), parts[1].to_string())
+    } else {
+        (HttpMethod::Any, route_key.to_string())
     }
 }
 
@@ -431,5 +580,65 @@ resource "aws_lambda_function" "api_handler" {
         assert_eq!(lambda.timeout, 30);
         assert_eq!(lambda.memory_size, 256);
         assert_eq!(lambda.environment.get("TABLE_NAME"), Some(&"my-table".to_string()));
+    }
+    
+    #[test]
+    fn test_parse_http_api_v2() {
+        let tf_content = r#"
+resource "aws_lambda_function" "hello" {
+  function_name = "hello-http"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+}
+
+resource "aws_apigatewayv2_api" "api" {
+  name          = "my-http-api"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_integration" "hello" {
+  api_id           = aws_apigatewayv2_api.api.id
+  integration_type = "AWS_PROXY"
+  integration_uri  = aws_lambda_function.hello.invoke_arn
+}
+
+resource "aws_apigatewayv2_route" "get_hello" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "GET /hello"
+  target    = aws_apigatewayv2_integration.hello.id
+}
+
+resource "aws_apigatewayv2_route" "default" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "$default"
+  target    = aws_apigatewayv2_integration.hello.id
+}
+"#;
+        
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+        
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        
+        assert_eq!(config.functions.len(), 1);
+        assert_eq!(config.gateways.len(), 1);
+        
+        let gw = &config.gateways[0];
+        assert_eq!(gw.name, "my-http-api");
+        assert_eq!(gw.api_type, ApiType::Http);
+        assert_eq!(gw.routes.len(), 2);
+        
+        // GET /hello
+        let r1 = &gw.routes[0];
+        assert_eq!(r1.method, HttpMethod::Get);
+        assert_eq!(r1.path, "/hello");
+        assert_eq!(r1.function_resource, "hello");
+        
+        // $default → ANY /
+        let r2 = &gw.routes[1];
+        assert_eq!(r2.method, HttpMethod::Any);
+        assert_eq!(r2.path, "/");
+        assert_eq!(r2.function_resource, "hello");
     }
 }
