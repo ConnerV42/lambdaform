@@ -84,7 +84,8 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Start { port, dir, watch } => {
-            cmd_start(port, dir, watch)
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(cmd_start(port, dir, watch))
         }
         Commands::Invoke {
             function,
@@ -102,7 +103,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn cmd_start(port: u16, dir: PathBuf, watch: bool) -> anyhow::Result<()> {
+async fn cmd_start(port: u16, dir: PathBuf, _watch: bool) -> anyhow::Result<()> {
     println!(
         r#"
 ┌─────────────────────────────────────────┐
@@ -112,20 +113,38 @@ fn cmd_start(port: u16, dir: PathBuf, watch: bool) -> anyhow::Result<()> {
 "#
     );
 
-    // TODO: Parse Terraform files
-    // TODO: Build route table
-    // TODO: Start HTTP server
-    // TODO: Start file watcher
-
     println!("📂 Loading Terraform from: {}", dir.display());
-    println!("🔥 Server would run at http://localhost:{}", port);
-    
-    if watch {
-        println!("👀 Watching for changes...");
+
+    // Parse Terraform files
+    let config = parser::parse_terraform_dir(&dir)?;
+
+    if config.functions.is_empty() {
+        println!("⚠️  No Lambda functions found in {}", dir.display());
+        return Ok(());
     }
 
-    // Placeholder - actual implementation coming
-    println!("\n⚠️  Not yet implemented - this is the MVP skeleton");
+    // Log discovered functions
+    println!("\n📦 Lambda Functions:");
+    for f in &config.functions {
+        println!("   • {} ({:?}) → {}", f.function_name, f.runtime, f.handler);
+    }
+
+    // Log discovered routes
+    if !config.gateways.is_empty() {
+        println!("\n🌐 Routes:");
+        for gw in &config.gateways {
+            for route in &gw.routes {
+                println!("   {:?} {} → {}", route.method, route.path, route.function_resource);
+            }
+        }
+    } else {
+        println!("\n⚠️  No API Gateway routes found — functions available via `lambdaform invoke` only");
+    }
+
+    println!("\n🔥 Starting server at http://localhost:{}\n", port);
+
+    // Start HTTP server (blocks until shutdown)
+    server::start_server(config, dir, port).await?;
 
     Ok(())
 }
