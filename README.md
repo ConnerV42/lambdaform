@@ -22,6 +22,37 @@ If you use Terraform for Lambda infrastructure, your local development options a
 - 🔥 **Hot reload** — instant feedback on code changes
 - 🆓 **Open source** — MIT license, no feature gating
 
+## Demo
+
+```bash
+$ lambdaform validate
+🔍 Validating Terraform in: ./
+   Found 2 .tf file(s)
+   Found 3 function(s), 1 gateway(s), 3 route(s)
+✅ Validation passed!
+
+$ lambdaform config
+📂 Parsed from: ./
+
+📦 Lambda Functions (3):
+   • hello-world (Nodejs20)
+     Handler: index.handler
+     Timeout: 30s, Memory: 128MB
+     Env vars: ["ENV", "GREETING"]
+   • echo (Nodejs20)
+     Handler: echo.handler
+     Timeout: 10s, Memory: 128MB
+   • get-user (Nodejs20)
+     Handler: users.handler
+     Timeout: 10s, Memory: 128MB
+
+🌐 API Gateways (1):
+   • hello-api (Rest)
+     Get /hello → hello
+     Post /echo → echo
+     Get /users/{id} → get_user
+```
+
 ## Quick Start
 
 ```bash
@@ -78,24 +109,32 @@ resource "aws_api_gateway_integration" "get_users" {
 }
 ```
 
-Lambdaform automatically creates routes:
+Lambdaform parses it and creates routes automatically:
 
 ```
+$ lambdaform config
+
+📂 Parsed from: ./
+
+📦 Lambda Functions (1):
+   • my-api (Nodejs20)
+     Handler: index.handler
+     Timeout: 30s, Memory: 128MB
+     Env vars: ["TABLE_NAME"]
+
+🌐 API Gateways (1):
+   • my-api (Rest)
+     Get /users → api_handler
+
 $ lambdaform start
 
-┌─────────────────────────────────────────┐
-│           🚀 Lambdaform v0.1.0          │
-│     Terraform-native Lambda emulator    │
-└─────────────────────────────────────────┘
-
-📦 Loaded 1 Lambda function:
-   • api_handler (nodejs20.x) → index.handler
-
-🌐 API Gateway routes:
-   GET /users → api_handler
-
+🚀 Lambdaform v0.1.0
+📦 Loaded 1 function, 1 route
 🔥 Server running at http://localhost:3000
 👀 Watching for changes...
+
+$ curl http://localhost:3000/users
+{"statusCode":200,"body":"[{\"id\":1,\"name\":\"Alice\"}]"}
 ```
 
 ## CLI Usage
