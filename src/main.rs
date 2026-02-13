@@ -8,6 +8,7 @@ use walkdir::WalkDir;
 
 mod config;
 mod parser;
+mod project_config;
 mod router;
 mod runtime;
 mod server;
@@ -117,7 +118,24 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool) -> anyhow::Result<()> {
     println!("📂 Loading Terraform from: {}", dir.display());
 
     // Parse Terraform files
-    let config = parser::parse_terraform_dir(&dir)?;
+    let mut config = parser::parse_terraform_dir(&dir)?;
+
+    // Load and apply project config (lambdaform.yaml)
+    let project_config = project_config::ProjectConfig::load(&dir)?;
+    if let Some(ref pc) = project_config {
+        println!("📄 Loaded lambdaform.yaml");
+        pc.apply(&mut config);
+    }
+    let port = if port != 3000 {
+        port // CLI explicitly set
+    } else {
+        project_config.as_ref().and_then(|pc| pc.port).unwrap_or(port)
+    };
+    let watch = if !watch {
+        false // CLI explicitly disabled
+    } else {
+        project_config.as_ref().and_then(|pc| pc.watch).unwrap_or(watch)
+    };
 
     if config.functions.is_empty() {
         println!("⚠️  No Lambda functions found in {}", dir.display());
@@ -150,11 +168,19 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool) -> anyhow::Result<()> {
 
     println!("\n🔥 Starting server at http://localhost:{}\n", port);
 
+    // CORS config
+    let cors_config = project_config.as_ref().and_then(|pc| pc.cors.clone());
+    if cors_config.is_some() {
+        println!("🔓 CORS enabled via lambdaform.yaml");
+    } else {
+        println!("🔓 CORS enabled (permissive defaults — allow all origins)");
+    }
+
     // Start HTTP server (blocks until shutdown)
     if watch {
-        server::start_server_with_watch(config, dir, port).await?;
+        server::start_server_with_watch(config, dir, port, cors_config.as_ref()).await?;
     } else {
-        server::start_server(config, dir, port).await?;
+        server::start_server(config, dir, port, cors_config.as_ref()).await?;
     }
 
     Ok(())

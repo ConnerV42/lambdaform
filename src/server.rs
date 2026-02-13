@@ -11,8 +11,10 @@ use axum::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::LambdaformConfig;
+use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
 use crate::runtime::{FunctionExecutor, LambdaEvent};
 
@@ -57,17 +59,80 @@ impl AppState {
     }
 }
 
+/// Build a CorsLayer from config
+fn build_cors_layer(cors_config: Option<&CorsConfig>) -> CorsLayer {
+    let config = match cors_config {
+        Some(c) => c.clone(),
+        None => CorsConfig::default(),
+    };
+
+    let mut layer = CorsLayer::new();
+
+    // Origins
+    if config.allow_origins.iter().any(|o| o == "*") {
+        layer = layer.allow_origin(Any);
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = config.allow_origins.iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        layer = layer.allow_origin(origins);
+    }
+
+    // Methods
+    if config.allow_methods.is_empty() {
+        layer = layer.allow_methods(Any);
+    } else {
+        let methods: Vec<Method> = config.allow_methods.iter()
+            .filter_map(|m| m.parse().ok())
+            .collect();
+        layer = layer.allow_methods(methods);
+    }
+
+    // Headers
+    if config.allow_headers.is_empty() || config.allow_headers.iter().any(|h| h == "*") {
+        layer = layer.allow_headers(Any);
+    } else {
+        let headers: Vec<axum::http::header::HeaderName> = config.allow_headers.iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        layer = layer.allow_headers(headers);
+    }
+
+    // Expose headers
+    if !config.expose_headers.is_empty() {
+        let headers: Vec<axum::http::header::HeaderName> = config.expose_headers.iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        layer = layer.expose_headers(headers);
+    }
+
+    // Credentials
+    if config.allow_credentials {
+        layer = layer.allow_credentials(true);
+    }
+
+    // Max age
+    if let Some(max_age) = config.max_age {
+        layer = layer.max_age(std::time::Duration::from_secs(max_age));
+    }
+
+    layer
+}
+
 /// Start the HTTP server
 pub async fn start_server(
     config: LambdaformConfig,
     source_dir: std::path::PathBuf,
     port: u16,
+    cors_config: Option<&CorsConfig>,
 ) -> anyhow::Result<()> {
     let state = Arc::new(AppState::new(config, source_dir));
+    let cors = build_cors_layer(cors_config);
 
     let app = Router::new()
         .route("/*path", any(handle_request))
         .route("/", any(handle_request))
+        .layer(cors)
         .with_state(state.clone());
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -84,8 +149,10 @@ pub async fn start_server_with_watch(
     config: LambdaformConfig,
     source_dir: std::path::PathBuf,
     port: u16,
+    cors_config: Option<&CorsConfig>,
 ) -> anyhow::Result<()> {
     let state = Arc::new(AppState::new(config, source_dir.clone()));
+    let cors = build_cors_layer(cors_config);
 
     // Start file watcher (hold handle to keep it alive)
     let watcher_state = state.clone();
@@ -95,6 +162,7 @@ pub async fn start_server_with_watch(
     let app = Router::new()
         .route("/*path", any(handle_request))
         .route("/", any(handle_request))
+        .layer(cors)
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
