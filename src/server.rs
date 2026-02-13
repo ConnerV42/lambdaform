@@ -193,7 +193,7 @@ async fn handle_request(
         } else {
             Some(matched.path_params)
         },
-        query_string_parameters: if query.is_empty() { None } else { Some(query) },
+        query_string_parameters: if query.is_empty() { None } else { Some(query.clone()) },
         headers: Some(
             headers
                 .iter()
@@ -210,7 +210,47 @@ async fn handle_request(
 
     // Clone what we need before dropping the lock
     let function = matched.function.clone();
+    let authorizer_function = matched.authorizer_function.cloned();
     drop(inner);
+
+    // Execute authorizer if present
+    if let Some(auth_fn) = authorizer_function {
+        let auth_event = crate::runtime::AuthorizerEvent {
+            auth_type: "TOKEN".to_string(),
+            authorization_token: headers.get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            method_arn: format!("arn:aws:execute-api:local:000000000000:api/{}/{}", method, path),
+            http_method: method.to_string(),
+            path: path.clone(),
+            headers: Some(headers.iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect()),
+            query_string_parameters: if query.is_empty() { None } else { Some(query.clone()) },
+        };
+
+        let auth_executor = FunctionExecutor::new(auth_fn, state.source_dir.clone());
+        match auth_executor.invoke_authorizer(auth_event).await {
+            Ok(result) => {
+                if !result.is_authorized {
+                    tracing::warn!("🔒 Authorizer denied: {} {}", method, path);
+                    let body = serde_json::json!({
+                        "message": "Unauthorized",
+                    });
+                    return (StatusCode::UNAUTHORIZED, body.to_string()).into_response();
+                }
+                tracing::info!("🔓 Authorizer allowed: {} {}", method, path);
+            }
+            Err(e) => {
+                tracing::error!("Authorizer error: {}", e);
+                let body = serde_json::json!({
+                    "message": "Authorizer error",
+                    "error": e.to_string(),
+                });
+                return (StatusCode::INTERNAL_SERVER_ERROR, body.to_string()).into_response();
+            }
+        }
+    }
 
     // Execute function
     let executor = FunctionExecutor::new(function, state.source_dir.clone());

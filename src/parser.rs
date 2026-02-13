@@ -46,6 +46,7 @@ struct ApigwMethod {
     rest_api_ref: String,
     resource_ref: String,
     http_method: String,
+    authorizer_ref: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +57,23 @@ struct ApigwIntegration {
     lambda_uri_ref: Option<String>,
 }
 
+/// API Gateway authorizer intermediate structs
+#[derive(Debug, Clone)]
+struct ApigwAuthorizer {
+    resource_name: String,
+    rest_api_ref: String,
+    lambda_uri_ref: Option<String>,
+    auth_type: String, // TOKEN, REQUEST, COGNITO_USER_POOLS
+}
+
+#[derive(Debug, Clone)]
+struct Apigwv2Authorizer {
+    resource_name: String,
+    api_ref: String,
+    lambda_uri_ref: Option<String>,
+    auth_type: String, // REQUEST, JWT
+}
+
 /// HTTP API Gateway v2 intermediate structs
 #[derive(Debug, Clone)]
 struct Apigwv2Route {
@@ -63,6 +81,7 @@ struct Apigwv2Route {
     api_ref: String,
     route_key: String,
     target_ref: Option<String>,
+    authorizer_ref: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +105,8 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
     let mut apigw_integrations: Vec<ApigwIntegration> = Vec::new();
     let mut apigwv2_routes: Vec<Apigwv2Route> = Vec::new();
     let mut apigwv2_integrations: Vec<Apigwv2Integration> = Vec::new();
+    let mut apigw_authorizers: Vec<ApigwAuthorizer> = Vec::new();
+    let mut apigwv2_authorizers: Vec<Apigwv2Authorizer> = Vec::new();
     
     // Extract resource blocks
     for block in body.blocks() {
@@ -137,6 +158,16 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
                             apigwv2_integrations.push(i);
                         }
                     }
+                    "aws_api_gateway_authorizer" => {
+                        if let Some(a) = parse_apigw_authorizer(resource_name, block) {
+                            apigw_authorizers.push(a);
+                        }
+                    }
+                    "aws_apigatewayv2_authorizer" => {
+                        if let Some(a) = parse_apigwv2_authorizer(resource_name, block) {
+                            apigwv2_authorizers.push(a);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -144,10 +175,10 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
     }
     
     // Resolve API Gateway v1 routes from resource→method→integration chain
-    resolve_api_gateway_routes(config, &apigw_resources, &apigw_methods, &apigw_integrations);
+    resolve_api_gateway_routes(config, &apigw_resources, &apigw_methods, &apigw_integrations, &apigw_authorizers);
     
     // Resolve API Gateway v2 routes from route→integration chain
-    resolve_apigatewayv2_routes(config, &apigwv2_routes, &apigwv2_integrations);
+    resolve_apigatewayv2_routes(config, &apigwv2_routes, &apigwv2_integrations, &apigwv2_authorizers);
     
     Ok(())
 }
@@ -171,6 +202,7 @@ fn parse_apigw_method(name: &str, block: &hcl::Block) -> Option<ApigwMethod> {
         rest_api_ref: get_traversal_attr(body, "rest_api_id").unwrap_or_default(),
         resource_ref: get_traversal_attr(body, "resource_id").unwrap_or_default(),
         http_method: get_string_attr(body, "http_method")?,
+        authorizer_ref: get_traversal_attr(body, "authorizer_id"),
     })
 }
 
@@ -191,6 +223,7 @@ fn resolve_api_gateway_routes(
     resources: &[ApigwResource],
     methods: &[ApigwMethod],
     integrations: &[ApigwIntegration],
+    authorizers: &[ApigwAuthorizer],
 ) {
     // Build resource name → path_part lookup
     let resource_paths: HashMap<String, String> = resources
@@ -198,17 +231,28 @@ fn resolve_api_gateway_routes(
         .map(|r| (r.resource_name.clone(), r.path_part.clone()))
         .collect();
     
+    // Build authorizer name → AuthorizerConfig lookup
+    let authorizer_map: HashMap<String, AuthorizerConfig> = authorizers
+        .iter()
+        .filter_map(|a| {
+            let auth_type = match a.auth_type.as_str() {
+                "TOKEN" | "REQUEST" => AuthorizerType::Lambda,
+                "COGNITO_USER_POOLS" => AuthorizerType::Cognito,
+                _ => AuthorizerType::Lambda,
+            };
+            let function_resource = a.lambda_uri_ref.as_ref().map(|uri| extract_lambda_name_from_ref(uri));
+            Some((a.resource_name.clone(), AuthorizerConfig { auth_type, function_resource }))
+        })
+        .collect();
+    
     // For each integration, find the matching method and resource to build a route
     for integration in integrations {
         // Extract lambda function resource name from uri ref
-        // e.g., "aws_lambda_function.hello.invoke_arn" → "hello"
         let lambda_resource = match &integration.lambda_uri_ref {
             Some(uri) => extract_lambda_name_from_ref(uri),
             None => continue,
         };
         
-        // Find the matching method by resource_ref
-        // resource_ref is like "aws_api_gateway_resource.hello.id" → "hello"
         let apigw_resource_name = extract_resource_name_from_ref(&integration.resource_ref);
         
         let path_part = match resource_paths.get(&apigw_resource_name) {
@@ -221,27 +265,36 @@ fn resolve_api_gateway_routes(
             extract_resource_name_from_ref(&m.resource_ref) == apigw_resource_name
         });
         
-        let http_method = match method {
+        let http_method = match &method {
             Some(m) => parse_http_method(&m.http_method),
             None => HttpMethod::Any,
         };
         
-        // Build the path (for now, simple single-level: /{path_part})
-        // TODO: Support nested resources by walking parent chain
+        // Resolve authorizer from method's authorizer_id ref
+        let authorizer = method.and_then(|m| {
+            m.authorizer_ref.as_ref().and_then(|ref_str| {
+                let auth_name = extract_resource_name_from_ref(ref_str);
+                authorizer_map.get(&auth_name).cloned()
+            })
+        });
+        
         let path = format!("/{}", path_part);
         
         let route = RouteConfig {
             method: http_method,
             path,
             function_resource: lambda_resource,
-            authorizer: None,
+            authorizer,
         };
         
-        // Find the gateway and add the route
-        // For simplicity, add to first gateway (most common case)
         if let Some(gateway) = config.gateways.first_mut() {
-            tracing::info!("Resolved route: {} {} → {}", 
-                route.method_str(), route.path, route.function_resource);
+            if route.authorizer.is_some() {
+                tracing::info!("Resolved route: {} {} → {} (with authorizer)", 
+                    route.method_str(), route.path, route.function_resource);
+            } else {
+                tracing::info!("Resolved route: {} {} → {}", 
+                    route.method_str(), route.path, route.function_resource);
+            }
             gateway.routes.push(route);
         }
     }
@@ -260,6 +313,28 @@ fn parse_apigatewayv2_api(name: &str, block: &hcl::Block) -> Result<Option<ApiGa
     }))
 }
 
+/// Parse aws_api_gateway_authorizer resource (v1)
+fn parse_apigw_authorizer(name: &str, block: &hcl::Block) -> Option<ApigwAuthorizer> {
+    let body = &block.body;
+    Some(ApigwAuthorizer {
+        resource_name: name.to_string(),
+        rest_api_ref: get_traversal_attr(body, "rest_api_id").unwrap_or_default(),
+        lambda_uri_ref: get_traversal_attr(body, "authorizer_uri"),
+        auth_type: get_string_attr(body, "type").unwrap_or_else(|| "TOKEN".to_string()),
+    })
+}
+
+/// Parse aws_apigatewayv2_authorizer resource (v2)
+fn parse_apigwv2_authorizer(name: &str, block: &hcl::Block) -> Option<Apigwv2Authorizer> {
+    let body = &block.body;
+    Some(Apigwv2Authorizer {
+        resource_name: name.to_string(),
+        api_ref: get_traversal_attr(body, "api_id").unwrap_or_default(),
+        lambda_uri_ref: get_traversal_attr(body, "authorizer_uri"),
+        auth_type: get_string_attr(body, "authorizer_type").unwrap_or_else(|| "REQUEST".to_string()),
+    })
+}
+
 /// Parse aws_apigatewayv2_route resource
 fn parse_apigatewayv2_route(name: &str, block: &hcl::Block) -> Option<Apigwv2Route> {
     let body = &block.body;
@@ -268,6 +343,9 @@ fn parse_apigatewayv2_route(name: &str, block: &hcl::Block) -> Option<Apigwv2Rou
         api_ref: get_traversal_attr(body, "api_id").unwrap_or_default(),
         route_key: get_string_attr(body, "route_key")?,
         target_ref: get_traversal_attr(body, "target").or_else(|| get_string_attr(body, "target")),
+        authorizer_ref: get_traversal_attr(body, "authorization_type")
+            .and_then(|t| if t == "NONE" { None } else { get_traversal_attr(body, "authorizer_id") })
+            .or_else(|| get_traversal_attr(body, "authorizer_id")),
     })
 }
 
@@ -287,6 +365,7 @@ fn resolve_apigatewayv2_routes(
     config: &mut LambdaformConfig,
     routes: &[Apigwv2Route],
     integrations: &[Apigwv2Integration],
+    authorizers: &[Apigwv2Authorizer],
 ) {
     // Build integration name → lambda resource lookup
     let integration_lambdas: HashMap<String, String> = integrations
@@ -325,11 +404,25 @@ fn resolve_apigatewayv2_routes(
             None => continue,
         };
         
+        // Resolve authorizer from route's authorizer_id ref
+        let authorizer = route.authorizer_ref.as_ref().and_then(|ref_str| {
+            let auth_name = extract_resource_name_from_ref(ref_str);
+            authorizers.iter().find(|a| a.resource_name == auth_name).and_then(|a| {
+                let auth_type = match a.auth_type.as_str() {
+                    "REQUEST" => AuthorizerType::Lambda,
+                    "JWT" => return None, // JWT authorizers don't need Lambda execution
+                    _ => AuthorizerType::Lambda,
+                };
+                let function_resource = a.lambda_uri_ref.as_ref().map(|uri| extract_lambda_name_from_ref(uri));
+                Some(AuthorizerConfig { auth_type, function_resource })
+            })
+        });
+        
         let route_config = RouteConfig {
             method,
             path,
             function_resource: lambda_resource.clone(),
-            authorizer: None,
+            authorizer,
         };
         
         // Find the matching v2 gateway
@@ -640,5 +733,77 @@ resource "aws_apigatewayv2_route" "default" {
         assert_eq!(r2.method, HttpMethod::Any);
         assert_eq!(r2.path, "/");
         assert_eq!(r2.function_resource, "hello");
+    }
+    
+    #[test]
+    fn test_parse_authorizer_v1() {
+        let tf_content = r#"
+resource "aws_lambda_function" "authorizer" {
+  function_name = "my-authorizer"
+  handler       = "auth.handler"
+  runtime       = "nodejs20.x"
+}
+
+resource "aws_lambda_function" "protected" {
+  function_name = "protected-api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+}
+
+resource "aws_api_gateway_rest_api" "api" {
+  name = "auth-test-api"
+}
+
+resource "aws_api_gateway_authorizer" "token_auth" {
+  name            = "token-authorizer"
+  rest_api_id     = aws_api_gateway_rest_api.api.id
+  authorizer_uri  = aws_lambda_function.authorizer.invoke_arn
+  type            = "TOKEN"
+}
+
+resource "aws_api_gateway_resource" "protected" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_rest_api.api.root_resource_id
+  path_part   = "protected"
+}
+
+resource "aws_api_gateway_method" "protected_get" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.protected.id
+  http_method   = "GET"
+  authorization = "CUSTOM"
+  authorizer_id = aws_api_gateway_authorizer.token_auth.id
+}
+
+resource "aws_api_gateway_integration" "protected" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  resource_id = aws_api_gateway_resource.protected.id
+  http_method = aws_api_gateway_method.protected_get.http_method
+  type        = "AWS_PROXY"
+  uri         = aws_lambda_function.protected.invoke_arn
+}
+"#;
+        
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+        
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        
+        assert_eq!(config.functions.len(), 2);
+        assert_eq!(config.gateways.len(), 1);
+        
+        let gw = &config.gateways[0];
+        assert_eq!(gw.routes.len(), 1);
+        
+        let route = &gw.routes[0];
+        assert_eq!(route.method, HttpMethod::Get);
+        assert_eq!(route.path, "/protected");
+        assert_eq!(route.function_resource, "protected");
+        
+        // Should have authorizer attached
+        let auth = route.authorizer.as_ref().expect("Route should have authorizer");
+        assert_eq!(auth.auth_type, AuthorizerType::Lambda);
+        assert_eq!(auth.function_resource, Some("authorizer".to_string()));
     }
 }

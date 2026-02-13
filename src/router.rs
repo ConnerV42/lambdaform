@@ -31,6 +31,9 @@ struct CompiledRoute {
     
     /// Target function resource name
     function_resource: String,
+    
+    /// Optional authorizer function resource name
+    authorizer_function_resource: Option<String>,
 }
 
 /// Route match result
@@ -40,6 +43,9 @@ pub struct RouteMatch<'a> {
     
     /// Path parameters extracted from the request
     pub path_params: HashMap<String, String>,
+    
+    /// Optional authorizer Lambda function
+    pub authorizer_function: Option<&'a LambdaConfig>,
 }
 
 impl Router {
@@ -52,7 +58,16 @@ impl Router {
         
         for gateway in gateways {
             for route in &gateway.routes {
-                if let Some(compiled) = compile_route(route) {
+                if let Some(mut compiled) = compile_route(route) {
+                    // Attach authorizer function resource if it's a Lambda authorizer
+                    compiled.authorizer_function_resource = route.authorizer.as_ref()
+                        .and_then(|a| {
+                            if a.auth_type == crate::config::AuthorizerType::Lambda {
+                                a.function_resource.clone()
+                            } else {
+                                None
+                            }
+                        });
                     routes.push(compiled);
                 }
             }
@@ -90,9 +105,12 @@ impl Router {
                 
                 // Look up function
                 if let Some(function) = self.functions.get(&route.function_resource) {
+                    let authorizer_function = route.authorizer_function_resource.as_ref()
+                        .and_then(|name| self.functions.get(name));
                     return Some(RouteMatch {
                         function,
                         path_params,
+                        authorizer_function,
                     });
                 }
             }
@@ -144,6 +162,7 @@ fn compile_route(route: &RouteConfig) -> Option<CompiledRoute> {
         param_names,
         method: route.method.clone(),
         function_resource: route.function_resource.clone(),
+        authorizer_function_resource: None, // Set by Router::new after compilation
     })
 }
 
