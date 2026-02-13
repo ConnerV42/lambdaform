@@ -42,11 +42,16 @@ pub enum FileChange {
     Terraform(std::path::PathBuf),
 }
 
-/// Start watching for file changes
+/// Handle returned by start_watching — must be kept alive
+pub struct WatchHandle {
+    _debouncer: notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>,
+}
+
+/// Start watching for file changes. Returns a handle that must be kept alive.
 pub fn start_watching(
     config: WatchConfig,
     callback: impl Fn(FileChange) + Send + 'static,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<WatchHandle> {
     let (tx, rx) = mpsc::channel();
     
     let mut debouncer = new_debouncer(
@@ -79,7 +84,7 @@ pub fn start_watching(
         }
     });
     
-    Ok(())
+    Ok(WatchHandle { _debouncer: debouncer })
 }
 
 /// Process a debounced event into a FileChange

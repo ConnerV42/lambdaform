@@ -103,7 +103,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn cmd_start(port: u16, dir: PathBuf, _watch: bool) -> anyhow::Result<()> {
+async fn cmd_start(port: u16, dir: PathBuf, watch: bool) -> anyhow::Result<()> {
     println!(
         r#"
 ┌─────────────────────────────────────────┐
@@ -141,10 +141,18 @@ async fn cmd_start(port: u16, dir: PathBuf, _watch: bool) -> anyhow::Result<()> 
         println!("\n⚠️  No API Gateway routes found — functions available via `lambdaform invoke` only");
     }
 
+    if watch {
+        println!("\n👀 Hot reload enabled — watching for file changes");
+    }
+
     println!("\n🔥 Starting server at http://localhost:{}\n", port);
 
     // Start HTTP server (blocks until shutdown)
-    server::start_server(config, dir, port).await?;
+    if watch {
+        server::start_server_with_watch(config, dir, port).await?;
+    } else {
+        server::start_server(config, dir, port).await?;
+    }
 
     Ok(())
 }
