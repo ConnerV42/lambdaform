@@ -17,10 +17,29 @@ If you use Terraform for Lambda infrastructure, your local development options a
 
 ## Features
 
-- 📖 **Reads your Terraform** — no separate configuration file
-- ⚡ **Fast startup** — single binary, no Docker
-- 🔥 **Hot reload** — instant feedback on code changes
+- 📖 **Reads your Terraform** — no separate configuration file needed
+- ⚡ **Fast startup** — single binary, no Docker required
+- 🔥 **Hot reload** — instant feedback on code and `.tf` changes
+- 🌐 **REST & HTTP APIs** — supports both API Gateway v1 (REST) and v2 (HTTP)
+- 🔒 **Lambda authorizers** — TOKEN and REQUEST authorizer support
+- 🐛 **Debugger integration** — attach Node.js (`--inspect-brk`) and Python (`debugpy`) debuggers
+- 🏎️ **Warm process pool** — ~3ms warm invocations (97% faster than cold start)
+- 🔀 **Multiple gateways** — each API gets its own port
+- 🌍 **CORS** — built-in, configurable via `lambdaform.yaml`
 - 🆓 **Open source** — MIT license, no feature gating
+
+## Quick Start
+
+```bash
+# Install
+cargo install lambdaform
+
+# Start in your Terraform project
+cd my-terraform-project
+lambdaform start
+
+# That's it! Server runs at http://localhost:3000
+```
 
 ## Demo
 
@@ -31,39 +50,48 @@ $ lambdaform validate
    Found 3 function(s), 1 gateway(s), 3 route(s)
 ✅ Validation passed!
 
-$ lambdaform config
-📂 Parsed from: ./
+$ lambdaform start
+🚀 Lambdaform dev server
+📦 Loaded 3 functions, 3 routes
+🔥 Hot reload enabled — watching for changes
+🌐 http://localhost:3000
 
-📦 Lambda Functions (3):
-   • hello-world (Nodejs20)
-     Handler: index.handler
-     Timeout: 30s, Memory: 128MB
-     Env vars: ["ENV", "GREETING"]
-   • echo (Nodejs20)
-     Handler: echo.handler
-     Timeout: 10s, Memory: 128MB
-   • get-user (Nodejs20)
-     Handler: users.handler
-     Timeout: 10s, Memory: 128MB
-
-🌐 API Gateways (1):
-   • hello-api (Rest)
-     Get /hello → hello
-     Post /echo → echo
-     Get /users/{id} → get_user
+$ curl http://localhost:3000/users/42
+{"statusCode":200,"body":"{\"id\":\"42\",\"name\":\"Alice\"}"}
 ```
 
-## Quick Start
+## Supported Runtimes
+
+| Runtime | Status | Invocation |
+|---------|--------|------------|
+| Node.js 18.x / 20.x | ✅ | Warm pool (~3ms) |
+| Python 3.10 / 3.11 / 3.12 | ✅ | Warm pool (~3ms) |
+| Go 1.x / provided.al2 / provided.al2023 | ✅ | Mini RIE (~14ms) |
+
+## CLI Usage
 
 ```bash
-# Install
-brew install lambdaform  # or cargo install lambdaform
-
-# Start in your Terraform project
-cd my-terraform-project
+# Start server
 lambdaform start
+lambdaform start --port 8080
+lambdaform start --dir ./infra
+lambdaform start --verbose          # detailed request logging
 
-# That's it! Server runs at http://localhost:3000
+# Debugger mode
+lambdaform start --debug                    # Node.js (port 9229)
+lambdaform start --debug-python             # Python debugpy (port 5678)
+lambdaform start --debug-port 9230          # custom port
+
+# Invoke function directly
+lambdaform invoke my_function --event '{"key": "value"}'
+lambdaform invoke my_function --event-file event.json
+
+# Show parsed configuration
+lambdaform config
+lambdaform config --json
+
+# Validate Terraform files
+lambdaform validate
 ```
 
 ## Example
@@ -75,7 +103,7 @@ resource "aws_lambda_function" "api_handler" {
   function_name = "my-api"
   handler       = "index.handler"
   runtime       = "nodejs20.x"
-  
+
   environment {
     variables = {
       TABLE_NAME = "users"
@@ -109,97 +137,140 @@ resource "aws_api_gateway_integration" "get_users" {
 }
 ```
 
-Lambdaform parses it and creates routes automatically:
+Lambdaform parses it and starts a local server automatically:
 
 ```
-$ lambdaform config
-
-📂 Parsed from: ./
-
-📦 Lambda Functions (1):
-   • my-api (Nodejs20)
-     Handler: index.handler
-     Timeout: 30s, Memory: 128MB
-     Env vars: ["TABLE_NAME"]
-
-🌐 API Gateways (1):
-   • my-api (Rest)
-     Get /users → api_handler
-
 $ lambdaform start
-
-🚀 Lambdaform v0.1.0
+🚀 Lambdaform dev server
 📦 Loaded 1 function, 1 route
-🔥 Server running at http://localhost:3000
-👀 Watching for changes...
+🔥 Hot reload enabled — watching for changes
+🌐 http://localhost:3000
 
 $ curl http://localhost:3000/users
 {"statusCode":200,"body":"[{\"id\":1,\"name\":\"Alice\"}]"}
 ```
 
-## CLI Usage
-
-```bash
-# Start server
-lambdaform start
-lambdaform start --port 8080
-lambdaform start --dir ./infra
-
-# Invoke function directly
-lambdaform invoke my_function --event '{"key": "value"}'
-lambdaform invoke my_function --event-file event.json
-
-# Show parsed configuration
-lambdaform config
-lambdaform config --json
-
-# Validate Terraform files
-lambdaform validate
-```
-
-## Supported Runtimes
-
-| Runtime | Status |
-|---------|--------|
-| Node.js 18.x | ✅ Supported |
-| Node.js 20.x | ✅ Supported |
-| Python 3.10 | ✅ Supported |
-| Python 3.11 | ✅ Supported |
-| Python 3.12 | ✅ Supported |
-| Go 1.x | 🚧 Planned |
-| Rust (provided.al2023) | 🚧 Planned |
-
 ## Configuration (Optional)
 
-For cases where HCL parsing needs hints, create `lambdaform.yaml`:
+For cases where HCL parsing needs hints, or to customize local behavior, create `lambdaform.yaml`:
 
 ```yaml
 version: 1
 
+# Override function settings
 functions:
   api_handler:
-    source: ./dist  # Override source path
+    source: ./dist
+    handler: build/index.handler
+    timeout: 30
+    memory: 256
+    environment:
+      TABLE_NAME: local-table
 
+# Global environment variables (applied to all functions)
 environment:
-  TABLE_NAME: local-table  # Local-only env vars
+  AWS_REGION: us-west-2
+  STAGE: local
 
+# Gateway settings
 gateway:
   port: 3000
-  cors: true
+
+# Per-gateway port overrides (for multi-gateway projects)
+gateways:
+  public_api:
+    port: 3000
+  admin_api:
+    port: 3001
+
+# CORS configuration
+cors:
+  allow_origins:
+    - "http://localhost:5173"
+  allow_methods:
+    - GET
+    - POST
+  allow_headers:
+    - Content-Type
+    - Authorization
+
+# Watch settings
+watch:
+  enabled: true
+  ignore:
+    - node_modules
+    - .terraform
+
+# Debugger settings
+debug:
+  enabled: false
+  port: 9229          # Node.js inspector port
+  python: false
+  python_port: 5678   # debugpy port
 ```
+
+## Lambda Authorizers
+
+Lambdaform supports v1 TOKEN/REQUEST and v2 REQUEST authorizers. Define them in your Terraform as usual — Lambdaform executes the authorizer Lambda before the target handler:
+
+```hcl
+resource "aws_api_gateway_authorizer" "token_auth" {
+  name            = "token-auth"
+  rest_api_id     = aws_api_gateway_rest_api.api.id
+  type            = "TOKEN"
+  authorizer_uri  = aws_lambda_function.authorizer.invoke_arn
+}
+```
+
+The authorizer runs first. If it returns a deny policy or throws, Lambdaform returns `401 Unauthorized`.
+
+## Multiple API Gateways
+
+Projects with multiple gateways get separate ports automatically:
+
+```
+🌐 public-api → http://localhost:3000
+🌐 admin-api  → http://localhost:3001
+```
+
+Override ports in `lambdaform.yaml` under the `gateways` section.
+
+## Debugger Integration
+
+### Node.js
+```bash
+lambdaform start --debug
+# Attach VS Code or Chrome DevTools to localhost:9229
+```
+
+### Python
+```bash
+lambdaform start --debug-python
+# Attach VS Code (Python: Remote Attach) to localhost:5678
+```
+
+Debug mode disables the warm process pool so breakpoints work correctly.
 
 ## Roadmap
 
 - [x] Parse `aws_lambda_function` from HCL
-- [x] Node.js runtime
-- [x] Python runtime
+- [x] Node.js runtime (18.x, 20.x)
+- [x] Python runtime (3.10–3.12)
+- [x] Go runtime (go1.x, provided.al2/al2023)
 - [x] API Gateway REST (v1) routing
+- [x] API Gateway HTTP (v2) routing
+- [x] Lambda authorizers (TOKEN + REQUEST)
 - [x] Hot reload
-- [ ] API Gateway HTTP (v2)
-- [ ] Lambda authorizers
+- [x] CORS handling
+- [x] Warm process pooling
+- [x] Debugger integration (Node.js + Python)
+- [x] Multiple API Gateway support
+- [x] Config file (`lambdaform.yaml`)
+- [ ] Lambda layers
 - [ ] WebSocket support
-- [ ] VS Code extension
-- [ ] Debugger integration
+- [ ] SQS/SNS trigger simulation
+- [ ] DynamoDB Local integration hints
+- [ ] Step Functions visualization
 
 ## Contributing
 

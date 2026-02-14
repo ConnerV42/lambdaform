@@ -199,3 +199,89 @@ impl Default for LambdaformConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_runtime_from_str_known() {
+        assert_eq!(Runtime::from_str("nodejs18.x"), Runtime::Nodejs18);
+        assert_eq!(Runtime::from_str("nodejs20.x"), Runtime::Nodejs20);
+        assert_eq!(Runtime::from_str("python3.10"), Runtime::Python310);
+        assert_eq!(Runtime::from_str("python3.11"), Runtime::Python311);
+        assert_eq!(Runtime::from_str("python3.12"), Runtime::Python312);
+        assert_eq!(Runtime::from_str("go1.x"), Runtime::Go1);
+        assert_eq!(Runtime::from_str("provided.al2"), Runtime::ProvidedAl2);
+        assert_eq!(Runtime::from_str("provided.al2023"), Runtime::ProvidedAl2023);
+    }
+
+    #[test]
+    fn test_runtime_from_str_unknown() {
+        assert_eq!(Runtime::from_str("ruby3.2"), Runtime::Unknown("ruby3.2".to_string()));
+        assert_eq!(Runtime::from_str(""), Runtime::Unknown("".to_string()));
+    }
+
+    #[test]
+    fn test_runtime_is_nodejs() {
+        assert!(Runtime::Nodejs18.is_nodejs());
+        assert!(Runtime::Nodejs20.is_nodejs());
+        assert!(!Runtime::Python312.is_nodejs());
+        assert!(!Runtime::Go1.is_nodejs());
+        assert!(!Runtime::Unknown("foo".to_string()).is_nodejs());
+    }
+
+    #[test]
+    fn test_runtime_is_python() {
+        assert!(Runtime::Python310.is_python());
+        assert!(Runtime::Python311.is_python());
+        assert!(Runtime::Python312.is_python());
+        assert!(!Runtime::Nodejs20.is_python());
+        assert!(!Runtime::Go1.is_python());
+    }
+
+    #[test]
+    fn test_runtime_is_go() {
+        assert!(Runtime::Go1.is_go());
+        assert!(Runtime::ProvidedAl2.is_go());
+        assert!(Runtime::ProvidedAl2023.is_go());
+        assert!(!Runtime::Nodejs20.is_go());
+        assert!(!Runtime::Python312.is_go());
+    }
+
+    #[test]
+    fn test_route_config_method_str() {
+        let cases = vec![
+            (HttpMethod::Get, "GET"),
+            (HttpMethod::Post, "POST"),
+            (HttpMethod::Put, "PUT"),
+            (HttpMethod::Patch, "PATCH"),
+            (HttpMethod::Delete, "DELETE"),
+            (HttpMethod::Options, "OPTIONS"),
+            (HttpMethod::Head, "HEAD"),
+            (HttpMethod::Any, "ANY"),
+        ];
+        for (method, expected) in cases {
+            let route = RouteConfig {
+                method,
+                path: "/test".to_string(),
+                function_resource: "fn".to_string(),
+                authorizer: None,
+            };
+            assert_eq!(route.method_str(), expected);
+        }
+    }
+
+    #[test]
+    fn test_lambdaform_config_default() {
+        let config = LambdaformConfig::default();
+        assert!(config.functions.is_empty());
+        assert!(config.gateways.is_empty());
+    }
+
+    #[test]
+    fn test_lambda_config_defaults() {
+        assert_eq!(default_timeout(), 3);
+        assert_eq!(default_memory(), 128);
+    }
+}
