@@ -390,7 +390,13 @@ process.stdin.once('data', async (data) => {{
         stdin.flush().await?;
         drop(stdin);
         
-        let output = child.wait_with_output().await?;
+        let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
+        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!(
+                "Task timed out after {}.00 seconds (configured timeout: {}s)",
+                self.config.timeout, self.config.timeout
+            ))??;
         let stdout = String::from_utf8_lossy(&output.stdout);
         
         for line in stdout.lines() {
@@ -443,7 +449,13 @@ except Exception as e:
         stdin.flush().await?;
         drop(stdin);
         
-        let output = child.wait_with_output().await?;
+        let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
+        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!(
+                "Task timed out after {}.00 seconds (configured timeout: {}s)",
+                self.config.timeout, self.config.timeout
+            ))??;
         let stdout = String::from_utf8_lossy(&output.stdout);
         
         for line in stdout.lines() {
@@ -808,7 +820,13 @@ process.stdin.once('data', async (data) => {{
         drop(stdin);
         
         // Read response
-        let output = child.wait_with_output().await?;
+        let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
+        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!(
+                "Task timed out after {}.00 seconds (configured timeout: {}s)",
+                self.config.timeout, self.config.timeout
+            ))??;
         let stdout = String::from_utf8_lossy(&output.stdout);
         
         // Find JSON line in output
@@ -913,7 +931,13 @@ except Exception as e:
         stdin.flush().await?;
         drop(stdin);
         
-        let output = child.wait_with_output().await?;
+        let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
+        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!(
+                "Task timed out after {}.00 seconds (configured timeout: {}s)",
+                self.config.timeout, self.config.timeout
+            ))??;
         let stdout = String::from_utf8_lossy(&output.stdout);
         
         for line in stdout.lines() {
@@ -1106,5 +1130,56 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "TOKEN");
         assert_eq!(json["authorizationToken"], "Bearer xyz");
+    }
+
+    #[tokio::test]
+    async fn test_nodejs_timeout_enforcement() {
+        use crate::config::LambdaConfig;
+        
+        let dir = TempDir::new().unwrap();
+        // Handler that sleeps longer than timeout
+        std::fs::write(dir.path().join("index.js"), r#"
+            exports.handler = async (event, context) => {
+                await new Promise(resolve => setTimeout(resolve, 60000));
+                return { statusCode: 200, body: "should not reach" };
+            };
+        "#).unwrap();
+
+        let config = LambdaConfig {
+            resource_name: "test".to_string(),
+            function_name: "timeout-test".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            environment: HashMap::new(),
+            timeout: 1,
+            memory_size: 128,
+            layers: Vec::new(),
+        };
+        let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
+        let event = LambdaEvent {
+            http_method: "GET".to_string(),
+            path: "/test".to_string(),
+            resource: "/test".to_string(),
+            path_parameters: None,
+            query_string_parameters: None,
+            headers: None,
+            body: None,
+            is_base64_encoded: false,
+            request_context: RequestContext {
+                stage: "local".to_string(),
+                resource_path: "/test".to_string(),
+                http_method: "GET".to_string(),
+                request_id: "test-timeout".to_string(),
+                api_id: "lambdaform".to_string(),
+                path: "/test".to_string(),
+                identity: RequestIdentity { source_ip: "127.0.0.1".to_string() },
+            },
+        };
+
+        let result = executor.invoke(event).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timed out"), "Expected timeout error, got: {}", err);
     }
 }
