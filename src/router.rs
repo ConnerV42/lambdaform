@@ -46,6 +46,9 @@ pub struct RouteMatch<'a> {
     
     /// Optional authorizer Lambda function
     pub authorizer_function: Option<&'a LambdaConfig>,
+
+    /// Original resource path template (e.g., /users/{id})
+    pub resource_path: Option<String>,
 }
 
 impl Router {
@@ -111,6 +114,7 @@ impl Router {
                         function,
                         path_params,
                         authorizer_function,
+                        resource_path: Some(route.path_pattern.clone()),
                     });
                 }
             }

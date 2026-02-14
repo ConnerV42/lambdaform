@@ -42,6 +42,14 @@ enum Commands {
         /// Verbose logging (show headers, bodies, debug info)
         #[arg(short, long)]
         verbose: bool,
+
+        /// Enable Node.js debugger (--inspect-brk)
+        #[arg(long)]
+        debug: bool,
+
+        /// Node.js debugger port (default: 9229)
+        #[arg(long, default_value = "9229")]
+        debug_port: u16,
     },
 
     /// Invoke a Lambda function directly
@@ -91,9 +99,9 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Start { port, dir, watch, verbose: _ } => {
+        Commands::Start { port, dir, watch, verbose: _, debug, debug_port } => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(cmd_start(port, dir, watch))
+            rt.block_on(cmd_start(port, dir, watch, debug, debug_port))
         }
         Commands::Invoke {
             function,
@@ -111,7 +119,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn cmd_start(port: u16, dir: PathBuf, watch: bool) -> anyhow::Result<()> {
+async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port: u16) -> anyhow::Result<()> {
     println!(
         r#"
 ┌─────────────────────────────────────────┐
@@ -182,11 +190,44 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool) -> anyhow::Result<()> {
         println!("🔓 CORS enabled (permissive defaults — allow all origins)");
     }
 
+    // Build debug options from CLI flags and/or project config
+    let debug_from_config = project_config.as_ref().and_then(|pc| pc.debug.clone());
+    let debug_options = if debug {
+        Some(runtime::DebugOptions {
+            nodejs: true,
+            port: debug_port,
+            break_on_start: true,
+        })
+    } else if let Some(dc) = debug_from_config {
+        if dc.nodejs {
+            Some(runtime::DebugOptions {
+                nodejs: true,
+                port: dc.port,
+                break_on_start: dc.break_on_start,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if debug_options.is_some() {
+        let opts = debug_options.as_ref().unwrap();
+        println!("\n🔍 Node.js debugger enabled on port {}", opts.port);
+        if opts.break_on_start {
+            println!("   Mode: --inspect-brk (pauses on first line)");
+        } else {
+            println!("   Mode: --inspect (runs immediately)");
+        }
+        println!("   Attach: chrome://inspect or VS Code \"Attach to Node.js\"");
+    }
+
     // Start HTTP server (blocks until shutdown)
     if watch {
-        server::start_server_with_watch(config, dir, port, cors_config.as_ref()).await?;
+        server::start_server_with_watch(config, dir, port, cors_config.as_ref(), debug_options).await?;
     } else {
-        server::start_server(config, dir, port, cors_config.as_ref()).await?;
+        server::start_server(config, dir, port, cors_config.as_ref(), debug_options).await?;
     }
 
     Ok(())
@@ -250,11 +291,24 @@ fn cmd_invoke(
         let lambda_event = runtime::LambdaEvent {
             http_method: "INVOKE".to_string(),
             path: "/".to_string(),
+            resource: "/".to_string(),
             path_parameters: None,
             query_string_parameters: None,
             headers: None,
             body: Some(event_json),
             is_base64_encoded: false,
+            request_context: runtime::RequestContext {
+                stage: "local".to_string(),
+                resource_path: "/".to_string(),
+                http_method: "INVOKE".to_string(),
+                request_id: format!("invoke-{}", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+                api_id: "lambdaform".to_string(),
+                path: "/".to_string(),
+                identity: runtime::RequestIdentity {
+                    source_ip: "127.0.0.1".to_string(),
+                },
+            },
         };
 
         let executor = runtime::FunctionExecutor::new(lambda.clone(), dir);

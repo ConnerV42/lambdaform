@@ -16,12 +16,13 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::config::LambdaformConfig;
 use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
-use crate::runtime::{FunctionExecutor, LambdaEvent};
+use crate::runtime::{DebugOptions, FunctionExecutor, LambdaEvent};
 
 /// Shared application state (behind RwLock for hot reload)
 pub struct AppState {
     pub inner: RwLock<AppStateInner>,
     pub source_dir: std::path::PathBuf,
+    pub debug: Option<DebugOptions>,
 }
 
 /// The reloadable portion of app state
@@ -31,11 +32,12 @@ pub struct AppStateInner {
 }
 
 impl AppState {
-    pub fn new(config: LambdaformConfig, source_dir: std::path::PathBuf) -> Self {
+    pub fn new(config: LambdaformConfig, source_dir: std::path::PathBuf, debug: Option<DebugOptions>) -> Self {
         let router = LambdaRouter::new(&config.gateways, &config.functions);
         Self {
             inner: RwLock::new(AppStateInner { router, config }),
             source_dir,
+            debug,
         }
     }
 
@@ -125,8 +127,9 @@ pub async fn start_server(
     source_dir: std::path::PathBuf,
     port: u16,
     cors_config: Option<&CorsConfig>,
+    debug: Option<DebugOptions>,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(AppState::new(config, source_dir));
+    let state = Arc::new(AppState::new(config, source_dir, debug));
     let cors = build_cors_layer(cors_config);
 
     let app = Router::new()
@@ -150,8 +153,9 @@ pub async fn start_server_with_watch(
     source_dir: std::path::PathBuf,
     port: u16,
     cors_config: Option<&CorsConfig>,
+    debug: Option<DebugOptions>,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(AppState::new(config, source_dir.clone()));
+    let state = Arc::new(AppState::new(config, source_dir.clone(), debug));
     let cors = build_cors_layer(cors_config);
 
     // Start file watcher (hold handle to keep it alive)
@@ -295,10 +299,28 @@ async fn handle_request(
         }
     };
 
+    // Build resource path (with parameter placeholders)
+    let resource_path = matched.resource_path.clone().unwrap_or_else(|| path.clone());
+
+    // Build request context (matches real AWS API Gateway)
+    let request_context = crate::runtime::RequestContext {
+        stage: "local".to_string(),
+        resource_path: resource_path.clone(),
+        http_method: method.to_string(),
+        request_id: format!("lambdaform-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+        api_id: "lambdaform".to_string(),
+        path: path.clone(),
+        identity: crate::runtime::RequestIdentity {
+            source_ip: "127.0.0.1".to_string(),
+        },
+    };
+
     // Build Lambda event
     let event = LambdaEvent {
         http_method: method.to_string(),
         path: path.clone(),
+        resource: resource_path,
         path_parameters: if matched.path_params.is_empty() {
             None
         } else {
@@ -317,6 +339,7 @@ async fn handle_request(
             Some(String::from_utf8_lossy(&body).to_string())
         },
         is_base64_encoded: false,
+        request_context,
     };
 
     // Clone what we need before dropping the lock
@@ -340,7 +363,8 @@ async fn handle_request(
             query_string_parameters: if query.is_empty() { None } else { Some(query.clone()) },
         };
 
-        let auth_executor = FunctionExecutor::new(auth_fn, state.source_dir.clone());
+        let auth_executor = FunctionExecutor::new(auth_fn, state.source_dir.clone())
+            .with_debug(state.debug.clone());
         match auth_executor.invoke_authorizer(auth_event).await {
             Ok(result) => {
                 if !result.is_authorized {
@@ -365,7 +389,8 @@ async fn handle_request(
     }
 
     // Execute function
-    let executor = FunctionExecutor::new(function.clone(), state.source_dir.clone());
+    let executor = FunctionExecutor::new(function.clone(), state.source_dir.clone())
+        .with_debug(state.debug.clone());
 
     match executor.invoke(event).await {
         Ok(response) => {

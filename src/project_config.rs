@@ -30,7 +30,30 @@ pub struct ProjectConfig {
 
     /// CORS configuration for the local server
     pub cors: Option<CorsConfig>,
+
+    /// Debug configuration
+    pub debug: Option<DebugConfig>,
 }
+
+/// Debug configuration
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DebugConfig {
+    /// Enable Node.js inspector (default: false)
+    #[serde(default)]
+    pub nodejs: bool,
+
+    /// Inspector port for Node.js (default: 9229)
+    #[serde(default = "default_debug_port")]
+    pub port: u16,
+
+    /// Break on first line (default: true, uses --inspect-brk)
+    #[serde(default = "default_true")]
+    pub break_on_start: bool,
+}
+
+fn default_debug_port() -> u16 { 9229 }
+fn default_true() -> bool { true }
 
 /// CORS configuration
 #[derive(Debug, Clone, Deserialize)]

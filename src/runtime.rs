@@ -6,22 +6,46 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::{Mutex, Notify};
 
 use crate::config::{LambdaConfig, Runtime};
 
-/// Lambda event structure (simplified API Gateway proxy format)
+/// Lambda event structure (API Gateway proxy format v1)
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LambdaEvent {
     pub http_method: String,
     pub path: String,
+    pub resource: String,
     pub path_parameters: Option<HashMap<String, String>>,
     pub query_string_parameters: Option<HashMap<String, String>>,
     pub headers: Option<HashMap<String, String>>,
     pub body: Option<String>,
     pub is_base64_encoded: bool,
+    pub request_context: RequestContext,
+}
+
+/// API Gateway request context (matches real AWS structure)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestContext {
+    pub stage: String,
+    pub resource_path: String,
+    pub http_method: String,
+    pub request_id: String,
+    pub api_id: String,
+    pub path: String,
+    pub identity: RequestIdentity,
+}
+
+/// Request identity info
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestIdentity {
+    pub source_ip: String,
 }
 
 /// Lambda context structure
@@ -82,15 +106,32 @@ pub struct AuthorizerResult {
     pub context: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Debug options for runtime execution
+#[derive(Debug, Clone, Default)]
+pub struct DebugOptions {
+    /// Enable Node.js inspector
+    pub nodejs: bool,
+    /// Inspector port (default: 9229)
+    pub port: u16,
+    /// Break on first line (--inspect-brk vs --inspect)
+    pub break_on_start: bool,
+}
+
 /// Executor for a Lambda function
 pub struct FunctionExecutor {
     config: LambdaConfig,
     source_dir: std::path::PathBuf,
+    debug: Option<DebugOptions>,
 }
 
 impl FunctionExecutor {
     pub fn new(config: LambdaConfig, source_dir: std::path::PathBuf) -> Self {
-        Self { config, source_dir }
+        Self { config, source_dir, debug: None }
+    }
+
+    pub fn with_debug(mut self, debug: Option<DebugOptions>) -> Self {
+        self.debug = debug;
+        self
     }
     
     /// Invoke the Lambda function as an authorizer
@@ -118,6 +159,10 @@ impl FunctionExecutor {
             }
             Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
                 self.invoke_python_raw(&payload).await?
+            }
+            Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
+                // Go authorizer: send auth event directly
+                self.invoke_go_with_rie(&serde_json::to_value(&event)?).await?
             }
             _ => {
                 anyhow::bail!("Unsupported runtime for authorizer: {:?}", self.config.runtime)
@@ -268,6 +313,165 @@ except Exception as e:
         anyhow::bail!("No valid response from authorizer Lambda")
     }
     
+    /// Build Go Lambda binary. Returns path to compiled binary.
+    async fn build_go(&self) -> Result<std::path::PathBuf> {
+        let source_dir = self.source_dir.canonicalize()
+            .with_context(|| format!("Source directory not found: {}", self.source_dir.display()))?;
+        let binary_path = source_dir.join("bootstrap");
+        
+        // Check if binary already exists and is newer than source
+        let needs_build = if binary_path.exists() {
+            let bin_modified = std::fs::metadata(&binary_path)?.modified()?;
+            // Check all .go files
+            let mut needs = false;
+            if let Ok(entries) = std::fs::read_dir(&source_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().map_or(false, |e| e == "go") {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(src_modified) = meta.modified() {
+                                if src_modified > bin_modified {
+                                    needs = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            needs
+        } else {
+            true
+        };
+        
+        if needs_build {
+            tracing::info!("Building Go Lambda in {}", source_dir.display());
+            let output = Command::new("go")
+                .args(["build", "-o", "bootstrap", "."])
+                .current_dir(&source_dir)
+                .env("GOOS", "linux")
+                .env("GOARCH", std::env::consts::ARCH)
+                .output()
+                .await
+                .context("Failed to run `go build`. Is Go installed?")?;
+            
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Go build failed:\n{}", stderr);
+            }
+            tracing::info!("Go build complete: {}", binary_path.display());
+        }
+        
+        Ok(binary_path)
+    }
+    
+    /// Run a Go Lambda binary with a mini Runtime Interface Emulator.
+    /// The binary polls GET /next for the event, then POSTs the response.
+    async fn invoke_go_with_rie(&self, event_json: &serde_json::Value) -> Result<serde_json::Value> {
+        let binary_path = self.build_go().await?;
+        
+        let request_id = uuid_simple();
+        let event_bytes: Vec<u8> = serde_json::to_vec(event_json)?;
+        
+        // Shared state for the mini RIE
+        let response: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let response_ready = Arc::new(Notify::new());
+        
+        // Build axum router for the Lambda Runtime API
+        use axum::{Router, routing::get, routing::post, extract::State, body::Bytes, http::StatusCode};
+        
+        #[derive(Clone)]
+        struct RieState {
+            event: Vec<u8>,
+            request_id: String,
+            response: Arc<Mutex<Option<serde_json::Value>>>,
+            response_ready: Arc<Notify>,
+        }
+        
+        let state = RieState {
+            event: event_bytes,
+            request_id: request_id,
+            response: response.clone(),
+            response_ready: response_ready.clone(),
+        };
+        
+        let app = Router::new()
+            .route(
+                "/2018-06-01/runtime/invocation/next",
+                get(|State(s): State<RieState>| async move {
+                    (
+                        StatusCode::OK,
+                        [
+                            ("Lambda-Runtime-Aws-Request-Id", s.request_id),
+                            ("Lambda-Runtime-Deadline-Ms", "30000".to_string()),
+                        ],
+                        s.event,
+                    )
+                })
+            )
+            .route(
+                "/2018-06-01/runtime/invocation/:request_id/response",
+                post(|State(s): State<RieState>, body: Bytes| async move {
+                    let val: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                    *s.response.lock().await = Some(val);
+                    s.response_ready.notify_one();
+                    StatusCode::ACCEPTED
+                })
+            )
+            .route(
+                "/2018-06-01/runtime/invocation/:request_id/error",
+                post(|State(s): State<RieState>, body: Bytes| async move {
+                    let err_str = String::from_utf8_lossy(&body).to_string();
+                    *s.response.lock().await = Some(serde_json::json!({"errorMessage": err_str}));
+                    s.response_ready.notify_one();
+                    StatusCode::ACCEPTED
+                })
+            )
+            .with_state(state);
+        
+        // Bind to random port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        
+        let server_handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        
+        // Run the Go binary
+        let mut child = Command::new(&binary_path)
+            .current_dir(&self.source_dir)
+            .env("AWS_LAMBDA_RUNTIME_API", format!("127.0.0.1:{}", port))
+            .env("_HANDLER", &self.config.handler)
+            .envs(&self.config.environment)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("Failed to spawn Go binary: {}", binary_path.display()))?;
+        
+        // Wait for response with timeout
+        let timeout = tokio::time::timeout(
+            std::time::Duration::from_secs(self.config.timeout as u64 + 5),
+            response_ready.notified()
+        ).await;
+        
+        // Kill the child process and server
+        child.kill().await.ok();
+        server_handle.abort();
+        
+        if timeout.is_err() {
+            anyhow::bail!("Go Lambda timed out after {}s", self.config.timeout);
+        }
+        
+        let result = response.lock().await.take()
+            .ok_or_else(|| anyhow::anyhow!("No response from Go Lambda"))?;
+        
+        // Check for error
+        if let Some(err) = result.get("errorMessage").and_then(|v| v.as_str()) {
+            anyhow::bail!("Go Lambda error: {}", err);
+        }
+        
+        Ok(result)
+    }
+    
     /// Invoke the Lambda function with an event
     pub async fn invoke(&self, event: LambdaEvent) -> Result<LambdaResponse> {
         let context = LambdaContext {
@@ -293,6 +497,9 @@ except Exception as e:
             Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
                 self.invoke_python(&payload).await
             }
+            Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
+                self.invoke_go(&payload).await
+            }
             _ => {
                 anyhow::bail!("Unsupported runtime: {:?}", self.config.runtime)
             }
@@ -306,7 +513,7 @@ except Exception as e:
         
         let handler_path = find_handler_file(&self.source_dir, file, "js")?;
         
-        // Node.js bootstrap script (inline)
+        // Node.js bootstrap script
         let bootstrap = format!(
             r#"
 const handler = require('{}');
@@ -328,9 +535,40 @@ process.stdin.once('data', async (data) => {{
             func
         );
         
-        let mut child = Command::new("node")
-            .arg("-e")
-            .arg(&bootstrap)
+        // Check if debug mode is enabled for Node.js
+        let debug_enabled = self.debug.as_ref().map_or(false, |d| d.nodejs);
+        
+        let mut cmd = Command::new("node");
+        
+        if debug_enabled {
+            let debug_opts = self.debug.as_ref().unwrap();
+            let flag = if debug_opts.break_on_start {
+                format!("--inspect-brk=0.0.0.0:{}", debug_opts.port)
+            } else {
+                format!("--inspect=0.0.0.0:{}", debug_opts.port)
+            };
+            cmd.arg(&flag);
+            tracing::info!("🔍 Node.js debugger listening on ws://0.0.0.0:{}", debug_opts.port);
+            tracing::info!("   Open chrome://inspect or attach VS Code to debug");
+        }
+        
+        // When debugging, write bootstrap to a temp file for better source visibility
+        // in debugger. Otherwise, use inline -e for speed.
+        let _temp_file; // hold reference to keep temp file alive
+        if debug_enabled {
+            let tmp = std::env::temp_dir().join(format!("lambdaform-bootstrap-{}.js", 
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_nanos()));
+            std::fs::write(&tmp, &bootstrap)
+                .context("Failed to write debug bootstrap file")?;
+            cmd.arg(&tmp);
+            _temp_file = Some(tmp);
+        } else {
+            cmd.arg("-e").arg(&bootstrap);
+            _temp_file = None;
+        }
+        
+        let mut child = cmd
             .current_dir(&self.source_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -431,6 +669,15 @@ except Exception as e:
         }
         
         anyhow::bail!("No valid response from Lambda")
+    }
+    
+    /// Invoke Go function via Runtime Interface Emulator
+    async fn invoke_go(&self, payload: &serde_json::Value) -> Result<LambdaResponse> {
+        // For Go, the event is the API Gateway event directly (not wrapped in {event, context})
+        let event = &payload["event"];
+        let result = self.invoke_go_with_rie(event).await?;
+        let response: LambdaResponse = serde_json::from_value(result)?;
+        Ok(response)
     }
 }
 

@@ -96,6 +96,10 @@ impl Runtime {
     pub fn is_python(&self) -> bool {
         matches!(self, Runtime::Python310 | Runtime::Python311 | Runtime::Python312)
     }
+    
+    pub fn is_go(&self) -> bool {
+        matches!(self, Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023)
+    }
 }
 
 /// API Gateway configuration
