@@ -202,6 +202,7 @@ mod tests {
             environment: HashMap::new(),
             timeout: 3,
             memory_size: 128,
+            layers: vec![],
         }
     }
     
@@ -219,6 +220,7 @@ mod tests {
             name: "test-api".to_string(),
             api_type: ApiType::Rest,
             routes,
+            route_selection_expression: None,
         }];
         
         let functions = vec![make_test_lambda("list_users")];
@@ -239,6 +241,7 @@ mod tests {
             name: "test-api".to_string(),
             api_type: ApiType::Rest,
             routes,
+            route_selection_expression: None,
         }];
         
         let functions = vec![make_test_lambda("get_user")];

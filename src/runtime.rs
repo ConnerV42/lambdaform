@@ -80,6 +80,41 @@ struct RuntimeResult {
     error: Option<String>,
 }
 
+/// WebSocket event structure (API Gateway WebSocket proxy format)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketEvent {
+    pub request_context: WebSocketRequestContext,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub is_base64_encoded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_value_headers: Option<HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_string_parameters: Option<HashMap<String, String>>,
+}
+
+/// WebSocket request context
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketRequestContext {
+    pub route_key: String,
+    pub event_type: String,
+    pub connection_id: String,
+    pub stage: String,
+    pub api_id: String,
+    pub request_id: String,
+    pub domain_name: String,
+    pub request_time_epoch: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    pub identity: RequestIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connected_at: Option<u64>,
+}
+
 /// Authorizer event sent to Lambda authorizer functions
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,11 +165,13 @@ pub struct FunctionExecutor {
     source_dir: std::path::PathBuf,
     debug: Option<DebugOptions>,
     pool: Option<Arc<ProcessPool>>,
+    /// Resolved layer directories (paths to extracted layer content)
+    layer_paths: Vec<std::path::PathBuf>,
 }
 
 impl FunctionExecutor {
     pub fn new(config: LambdaConfig, source_dir: std::path::PathBuf) -> Self {
-        Self { config, source_dir, debug: None, pool: None }
+        Self { config, source_dir, debug: None, pool: None, layer_paths: Vec::new() }
     }
 
     pub fn with_debug(mut self, debug: Option<DebugOptions>) -> Self {
@@ -145,6 +182,96 @@ impl FunctionExecutor {
     pub fn with_pool(mut self, pool: Option<Arc<ProcessPool>>) -> Self {
         self.pool = pool;
         self
+    }
+
+    pub fn with_layer_paths(mut self, layer_paths: Vec<std::path::PathBuf>) -> Self {
+        self.layer_paths = layer_paths;
+        self
+    }
+    
+    /// Build environment variables with layer paths added to NODE_PATH/PYTHONPATH
+    fn env_with_layers(&self) -> HashMap<String, String> {
+        let mut env = self.config.environment.clone();
+        
+        if self.layer_paths.is_empty() {
+            return env;
+        }
+        
+        // For Node.js layers: content is in nodejs/node_modules
+        if self.config.runtime.is_nodejs() {
+            let layer_node_paths: Vec<String> = self.layer_paths.iter()
+                .flat_map(|p| {
+                    // AWS Lambda layers can have code in:
+                    // - nodejs/node_modules (most common)
+                    // - nodejs/ (for non-module files)
+                    let mut paths = Vec::new();
+                    let nodejs_modules = p.join("nodejs").join("node_modules");
+                    let nodejs = p.join("nodejs");
+                    if nodejs_modules.exists() {
+                        paths.push(nodejs_modules.to_string_lossy().to_string());
+                    }
+                    if nodejs.exists() {
+                        paths.push(nodejs.to_string_lossy().to_string());
+                    }
+                    // Also check root node_modules
+                    let root_modules = p.join("node_modules");
+                    if root_modules.exists() {
+                        paths.push(root_modules.to_string_lossy().to_string());
+                    }
+                    paths
+                })
+                .collect();
+            
+            if !layer_node_paths.is_empty() {
+                let existing = env.get("NODE_PATH").cloned().unwrap_or_default();
+                let combined = if existing.is_empty() {
+                    layer_node_paths.join(":")
+                } else {
+                    format!("{}:{}", layer_node_paths.join(":"), existing)
+                };
+                env.insert("NODE_PATH".to_string(), combined);
+                tracing::debug!("NODE_PATH with layers: {}", env["NODE_PATH"]);
+            }
+        }
+        
+        // For Python layers: content is in python/ or python/lib/pythonX.Y/site-packages
+        if self.config.runtime.is_python() {
+            let layer_python_paths: Vec<String> = self.layer_paths.iter()
+                .flat_map(|p| {
+                    let mut paths = Vec::new();
+                    let python_dir = p.join("python");
+                    if python_dir.exists() {
+                        paths.push(python_dir.to_string_lossy().to_string());
+                    }
+                    // Check for lib/pythonX.Y/site-packages
+                    let lib_dir = python_dir.join("lib");
+                    if lib_dir.exists() {
+                        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
+                            for entry in entries.flatten() {
+                                let sp = entry.path().join("site-packages");
+                                if sp.exists() {
+                                    paths.push(sp.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    }
+                    paths
+                })
+                .collect();
+            
+            if !layer_python_paths.is_empty() {
+                let existing = env.get("PYTHONPATH").cloned().unwrap_or_default();
+                let combined = if existing.is_empty() {
+                    layer_python_paths.join(":")
+                } else {
+                    format!("{}:{}", layer_python_paths.join(":"), existing)
+                };
+                env.insert("PYTHONPATH".to_string(), combined);
+                tracing::debug!("PYTHONPATH with layers: {}", env["PYTHONPATH"]);
+            }
+        }
+        
+        env
     }
 
     /// Whether to use the process pool (not in debug mode).
@@ -255,7 +382,7 @@ process.stdin.once('data', async (data) => {{
             .arg("-e").arg(&bootstrap)
             .current_dir(&self.source_dir)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .envs(&self.config.environment)
+            .envs(&self.env_with_layers())
             .spawn().context("Failed to spawn Node.js process")?;
         
         let mut stdin = child.stdin.take().unwrap();
@@ -308,7 +435,7 @@ except Exception as e:
             .arg("-c").arg(&bootstrap)
             .current_dir(&self.source_dir)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .envs(&self.config.environment)
+            .envs(&self.env_with_layers())
             .spawn().context("Failed to spawn Python process")?;
         
         let mut stdin = child.stdin.take().unwrap();
@@ -459,7 +586,7 @@ except Exception as e:
             .current_dir(&self.source_dir)
             .env("AWS_LAMBDA_RUNTIME_API", format!("127.0.0.1:{}", port))
             .env("_HANDLER", &self.config.handler)
-            .envs(&self.config.environment)
+            .envs(&self.env_with_layers())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -513,12 +640,13 @@ except Exception as e:
             match &self.config.runtime {
                 Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
                     let pool = self.pool.as_ref().unwrap();
+                    let env = self.env_with_layers();
                     let result = pool.invoke(
                         &self.config.function_name,
                         &self.config.runtime,
                         &self.config.handler,
                         &self.source_dir,
-                        &self.config.environment,
+                        &env,
                         &payload["event"],
                         &payload["context"],
                     ).await?;
@@ -612,7 +740,7 @@ process.stdin.once('data', async (data) => {{
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .envs(&self.config.environment)
+            .envs(&self.env_with_layers())
             .spawn()
             .context("Failed to spawn Node.js process")?;
         
@@ -719,7 +847,7 @@ except Exception as e:
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .envs(&self.config.environment)
+            .envs(&self.env_with_layers())
             .spawn()
             .context("Failed to spawn Python process")?;
         

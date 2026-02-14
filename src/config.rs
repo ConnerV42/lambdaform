@@ -14,7 +14,75 @@ pub struct LambdaformConfig {
     
     /// API Gateway configurations
     pub gateways: Vec<ApiGatewayConfig>,
+    
+    /// Lambda layer configurations
+    #[serde(default)]
+    pub layers: Vec<LayerConfig>,
+    
+    /// Step Functions state machine configurations
+    #[serde(default)]
+    pub state_machines: Vec<StepFunctionConfig>,
+    
+    /// DynamoDB table configurations (for integration hints)
+    #[serde(default)]
+    pub dynamodb_tables: Vec<DynamoDbTableConfig>,
 }
+
+/// DynamoDB table configuration (parsed for integration hints)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamoDbTableConfig {
+    /// Resource name in Terraform (aws_dynamodb_table.NAME)
+    pub resource_name: String,
+    
+    /// Table name
+    pub name: String,
+    
+    /// Hash key (partition key)
+    pub hash_key: Option<String>,
+    
+    /// Range key (sort key)
+    pub range_key: Option<String>,
+    
+    /// Billing mode (PAY_PER_REQUEST or PROVISIONED)
+    #[serde(default = "default_billing_mode")]
+    pub billing_mode: String,
+    
+    /// Global Secondary Index names
+    #[serde(default)]
+    pub gsi_names: Vec<String>,
+    
+    /// Local Secondary Index names
+    #[serde(default)]
+    pub lsi_names: Vec<String>,
+    
+    /// Whether stream is enabled
+    #[serde(default)]
+    pub stream_enabled: bool,
+}
+
+fn default_billing_mode() -> String { "PROVISIONED".to_string() }
+
+/// Step Functions state machine configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepFunctionConfig {
+    /// Resource name in Terraform (aws_sfn_state_machine.NAME)
+    pub resource_name: String,
+    
+    /// State machine name
+    pub name: String,
+    
+    /// State machine type (STANDARD or EXPRESS)
+    #[serde(default = "default_sfn_type")]
+    pub machine_type: String,
+    
+    /// ASL definition (Amazon States Language JSON)
+    pub definition: String,
+    
+    /// IAM role reference
+    pub role_arn_ref: Option<String>,
+}
+
+fn default_sfn_type() -> String { "STANDARD".to_string() }
 
 /// Lambda function configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +113,27 @@ pub struct LambdaConfig {
     /// Memory size in MB
     #[serde(default = "default_memory")]
     pub memory_size: u32,
+    
+    /// Lambda layer references (resource names of aws_lambda_layer_version)
+    #[serde(default)]
+    pub layers: Vec<String>,
+}
+
+/// Lambda layer configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerConfig {
+    /// Resource name in Terraform (aws_lambda_layer_version.NAME)
+    pub resource_name: String,
+    
+    /// Layer name
+    pub layer_name: String,
+    
+    /// Path to layer content directory
+    pub source_path: Option<PathBuf>,
+    
+    /// Compatible runtimes
+    #[serde(default)]
+    pub compatible_runtimes: Vec<String>,
 }
 
 fn default_timeout() -> u32 { 3 }
@@ -117,13 +206,18 @@ pub struct ApiGatewayConfig {
     
     /// Routes
     pub routes: Vec<RouteConfig>,
+    
+    /// Route selection expression for WebSocket APIs (e.g., "$request.body.action")
+    #[serde(default)]
+    pub route_selection_expression: Option<String>,
 }
 
 /// API Gateway type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ApiType {
-    Rest,  // v1
-    Http,  // v2
+    Rest,      // v1
+    Http,      // v2
+    WebSocket, // v2 WebSocket
 }
 
 /// Route configuration
@@ -197,6 +291,9 @@ impl Default for LambdaformConfig {
         Self {
             functions: Vec::new(),
             gateways: Vec::new(),
+            layers: Vec::new(),
+            state_machines: Vec::new(),
+            dynamodb_tables: Vec::new(),
         }
     }
 }

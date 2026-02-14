@@ -14,6 +14,8 @@ mod router;
 mod runtime;
 mod server;
 mod watcher;
+mod stepfunctions;
+mod websocket;
 
 /// Terraform-native local Lambda emulator
 #[derive(Parser)]
@@ -92,6 +94,22 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         dir: PathBuf,
     },
+
+    /// Visualize Step Functions state machines (read-only)
+    #[command(name = "stepfunctions", alias = "sfn")]
+    StepFunctions {
+        /// Directory containing Terraform files
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+
+        /// Show only a specific state machine by name
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -124,6 +142,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Validate { dir } => {
             cmd_validate(dir)
+        }
+        Commands::StepFunctions { dir, name, json } => {
+            cmd_stepfunctions(dir, name, json)
         }
     }
 }
@@ -232,6 +253,21 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port
         println!("🔓 CORS enabled (permissive defaults — allow all origins)");
     }
 
+    // DynamoDB Local integration hints
+    if !config.dynamodb_tables.is_empty() {
+        println!("\n🗄️  DynamoDB tables detected ({}):", config.dynamodb_tables.len());
+        for table in &config.dynamodb_tables {
+            let keys = match (&table.hash_key, &table.range_key) {
+                (Some(hk), Some(rk)) => format!("{} + {}", hk, rk),
+                (Some(hk), None) => hk.clone(),
+                _ => "?".to_string(),
+            };
+            println!("   • {} [{}]", table.name, keys);
+        }
+        println!("   💡 Tip: docker run -p 8000:8000 amazon/dynamodb-local");
+        println!("   💡 Set AWS_ENDPOINT_URL=http://localhost:8000 in lambdaform.yaml");
+    }
+
     // Build debug options from CLI flags and/or project config
     let debug_from_config = project_config.as_ref().and_then(|pc| pc.debug.clone());
     
@@ -271,13 +307,72 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port
         }
     }
 
+    // Separate WebSocket gateways from HTTP gateways
+    let ws_gateways: Vec<_> = config.gateways.iter()
+        .filter(|g| g.api_type == config::ApiType::WebSocket)
+        .cloned()
+        .collect();
+    
+    let mut ws_handles = Vec::new();
+    
+    for (i, ws_gw) in ws_gateways.iter().enumerate() {
+        let ws_port = project_config.as_ref()
+            .and_then(|pc| pc.gateways.get(&ws_gw.resource_name))
+            .and_then(|ovr| ovr.port)
+            .unwrap_or(port + 100 + i as u16); // Default: base port + 100
+        
+        let route_selection = ws_gw.route_selection_expression
+            .clone()
+            .unwrap_or_else(|| "$request.body.action".to_string());
+        
+        println!("\n🔌 WebSocket Gateway: {} → ws://localhost:{}", ws_gw.name, ws_port);
+        println!("   Route selection: {}", route_selection);
+        for route in &ws_gw.routes {
+            println!("   {} → {}", route.path, route.function_resource);
+        }
+        println!("   @connections API → http://localhost:{}", ws_port + 1000);
+        
+        let ws_config = config.clone();
+        let ws_dir = dir.clone();
+        let ws_resource = ws_gw.resource_name.clone();
+        let ws_debug = debug_options.clone();
+        
+        let handle = tokio::spawn(async move {
+            websocket::start_websocket_server(
+                ws_config,
+                &ws_resource,
+                ws_dir,
+                ws_port,
+                route_selection,
+                ws_debug,
+            ).await
+        });
+        ws_handles.push(handle);
+    }
+
+    // Filter HTTP-only gateway bindings
+    let http_bindings: Vec<_> = gateway_bindings.into_iter()
+        .filter(|b| {
+            config.gateways.iter().any(|g| 
+                g.resource_name == b.gateway_resource && g.api_type != config::ApiType::WebSocket
+            )
+        })
+        .collect();
+    let has_http_gateways = config.gateways.iter().any(|g| g.api_type != config::ApiType::WebSocket);
+
     // Start HTTP server(s) (blocks until shutdown)
-    if multi_gateway {
-        server::start_multi_gateway(config, dir, gateway_bindings, watch, cors_config.as_ref(), debug_options).await?;
-    } else if watch {
-        server::start_server_with_watch(config, dir, port, cors_config.as_ref(), debug_options).await?;
-    } else {
-        server::start_server(config, dir, port, cors_config.as_ref(), debug_options).await?;
+    if http_bindings.len() > 1 {
+        server::start_multi_gateway(config, dir, http_bindings, watch, cors_config.as_ref(), debug_options).await?;
+    } else if has_http_gateways {
+        if watch {
+            server::start_server_with_watch(config, dir, port, cors_config.as_ref(), debug_options).await?;
+        } else {
+            server::start_server(config, dir, port, cors_config.as_ref(), debug_options).await?;
+        }
+    } else if !ws_handles.is_empty() {
+        // Only WebSocket gateways, wait for them
+        let (result, _, _) = futures::future::select_all(ws_handles).await;
+        result??;
     }
 
     Ok(())
@@ -418,6 +513,45 @@ fn cmd_config(json_output: bool, dir: PathBuf) -> anyhow::Result<()> {
                 }
             }
         }
+        
+        if !config.state_machines.is_empty() {
+            println!("\n🔄 Step Functions ({}):", config.state_machines.len());
+            for sm in &config.state_machines {
+                let summary = stepfunctions::summarize(&sm.definition)
+                    .unwrap_or_else(|| "unparseable".to_string());
+                println!("   • {} ({}) — {}", sm.name, sm.machine_type, summary);
+            }
+            println!("\n   Run `lambdaform stepfunctions` for full visualization.");
+        }
+        
+        if !config.dynamodb_tables.is_empty() {
+            println!("\n🗄️  DynamoDB Tables ({}):", config.dynamodb_tables.len());
+            for table in &config.dynamodb_tables {
+                let keys = match (&table.hash_key, &table.range_key) {
+                    (Some(hk), Some(rk)) => format!("{} (PK) + {} (SK)", hk, rk),
+                    (Some(hk), None) => format!("{} (PK)", hk),
+                    _ => "unknown".to_string(),
+                };
+                println!("   • {} — {}", table.name, keys);
+                if !table.gsi_names.is_empty() {
+                    println!("     GSIs: {}", table.gsi_names.join(", "));
+                }
+                if !table.lsi_names.is_empty() {
+                    println!("     LSIs: {}", table.lsi_names.join(", "));
+                }
+                if table.stream_enabled {
+                    println!("     Streams: enabled");
+                }
+            }
+            println!("\n   💡 Local development hint:");
+            println!("      Run DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local");
+            println!("      Set env in lambdaform.yaml:");
+            println!("        environment:");
+            println!("          AWS_ENDPOINT_URL: http://localhost:8000");
+            println!("          AWS_REGION: us-east-1");
+            println!("          AWS_ACCESS_KEY_ID: local");
+            println!("          AWS_SECRET_ACCESS_KEY: local");
+        }
     }
     
     Ok(())
@@ -556,5 +690,54 @@ fn cmd_validate(dir: PathBuf) -> anyhow::Result<()> {
     }
 
     println!("\n✅ Validation passed!");
+    Ok(())
+}
+
+fn cmd_stepfunctions(dir: PathBuf, name: Option<String>, json_output: bool) -> anyhow::Result<()> {
+    let config = parser::parse_terraform_dir(&dir)?;
+    
+    if config.state_machines.is_empty() {
+        println!("⚠️  No Step Functions state machines found in {}", dir.display());
+        println!("\nHint: Make sure your .tf files contain aws_sfn_state_machine resources.");
+        return Ok(());
+    }
+    
+    let machines: Vec<_> = if let Some(ref filter) = name {
+        config.state_machines.iter()
+            .filter(|sm| sm.name == *filter || sm.resource_name == *filter)
+            .collect()
+    } else {
+        config.state_machines.iter().collect()
+    };
+    
+    if machines.is_empty() {
+        let available: Vec<_> = config.state_machines.iter()
+            .map(|sm| format!("  • {} ({})", sm.name, sm.resource_name))
+            .collect();
+        anyhow::bail!(
+            "State machine '{}' not found.\n\nAvailable:\n{}",
+            name.unwrap_or_default(),
+            available.join("\n")
+        );
+    }
+    
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&config.state_machines)?);
+        return Ok(());
+    }
+    
+    println!("📂 Step Functions in: {}\n", dir.display());
+    println!("Found {} state machine(s)\n", machines.len());
+    
+    for sm in &machines {
+        println!("{}", "═".repeat(60));
+        println!("{}", stepfunctions::render_ascii(&sm.name, &sm.machine_type, &sm.definition));
+        
+        if let Some(summary) = stepfunctions::summarize(&sm.definition) {
+            println!("   Summary: {}", summary);
+        }
+        println!();
+    }
+    
     Ok(())
 }

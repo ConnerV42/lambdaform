@@ -174,6 +174,21 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
                             apigwv2_authorizers.push(a);
                         }
                     }
+                    "aws_lambda_layer_version" => {
+                        if let Some(layer) = parse_lambda_layer(resource_name, block)? {
+                            config.layers.push(layer);
+                        }
+                    }
+                    "aws_sfn_state_machine" => {
+                        if let Some(sm) = parse_sfn_state_machine(resource_name, block)? {
+                            config.state_machines.push(sm);
+                        }
+                    }
+                    "aws_dynamodb_table" => {
+                        if let Some(table) = parse_dynamodb_table(resource_name, block)? {
+                            config.dynamodb_tables.push(table);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -310,12 +325,21 @@ fn resolve_api_gateway_routes(
 fn parse_apigatewayv2_api(name: &str, block: &hcl::Block) -> Result<Option<ApiGatewayConfig>> {
     let body = &block.body;
     let api_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+    let protocol_type = get_string_attr(body, "protocol_type").unwrap_or_else(|| "HTTP".to_string());
+    let route_selection_expression = get_string_attr(body, "route_selection_expression");
+    
+    let api_type = if protocol_type.eq_ignore_ascii_case("WEBSOCKET") {
+        ApiType::WebSocket
+    } else {
+        ApiType::Http
+    };
     
     Ok(Some(ApiGatewayConfig {
         resource_name: name.to_string(),
         name: api_name,
-        api_type: ApiType::Http,
+        api_type,
         routes: Vec::new(),
+        route_selection_expression,
     }))
 }
 
@@ -434,7 +458,7 @@ fn resolve_apigatewayv2_routes(
         // Find the matching v2 gateway
         let api_resource_name = extract_resource_name_from_ref(&route.api_ref);
         let gateway = config.gateways.iter_mut().find(|g| {
-            g.resource_name == api_resource_name && g.api_type == ApiType::Http
+            g.resource_name == api_resource_name && (g.api_type == ApiType::Http || g.api_type == ApiType::WebSocket)
         });
         
         if let Some(gateway) = gateway {
@@ -446,16 +470,20 @@ fn resolve_apigatewayv2_routes(
 }
 
 /// Parse a v2 route key like "GET /users/{id}" into (HttpMethod, path)
+/// For WebSocket APIs, route keys are: $connect, $disconnect, $default, or custom action names
 fn parse_v2_route_key(route_key: &str) -> (HttpMethod, String) {
-    if route_key == "$default" {
-        return (HttpMethod::Any, "/".to_string());
-    }
-    
-    let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
-    if parts.len() == 2 {
-        (parse_http_method(parts[0]), parts[1].to_string())
-    } else {
-        (HttpMethod::Any, route_key.to_string())
+    match route_key {
+        "$default" => (HttpMethod::Any, "/".to_string()),
+        "$connect" | "$disconnect" => (HttpMethod::Any, route_key.to_string()),
+        _ => {
+            let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                (parse_http_method(parts[0]), parts[1].to_string())
+            } else {
+                // Could be a custom WebSocket action name (e.g., "sendmessage")
+                (HttpMethod::Any, route_key.to_string())
+            }
+        }
     }
 }
 
@@ -532,6 +560,12 @@ fn parse_lambda_function(name: &str, block: &hcl::Block) -> Result<Option<Lambda
         }))
         .map(std::path::PathBuf::from);
     
+    // Extract layer references (e.g., [aws_lambda_layer_version.utils.arn])
+    let layers = get_list_traversal_attrs(body, "layers")
+        .into_iter()
+        .filter_map(|ref_str| extract_layer_resource_name(&ref_str))
+        .collect();
+    
     Ok(Some(LambdaConfig {
         resource_name: name.to_string(),
         function_name,
@@ -541,7 +575,163 @@ fn parse_lambda_function(name: &str, block: &hcl::Block) -> Result<Option<Lambda
         environment,
         timeout,
         memory_size,
+        layers,
     }))
+}
+
+/// Parse aws_lambda_layer_version resource
+fn parse_lambda_layer(name: &str, block: &hcl::Block) -> Result<Option<crate::config::LayerConfig>> {
+    let body = &block.body;
+    
+    let layer_name = get_string_attr(body, "layer_name")
+        .unwrap_or_else(|| name.to_string());
+    
+    // Source path from filename attribute
+    let source_path = get_string_attr(body, "filename")
+        .map(std::path::PathBuf::from);
+    
+    // Compatible runtimes
+    let compatible_runtimes = get_list_string_attrs(body, "compatible_runtimes");
+    
+    Ok(Some(crate::config::LayerConfig {
+        resource_name: name.to_string(),
+        layer_name,
+        source_path,
+        compatible_runtimes,
+    }))
+}
+
+/// Parse aws_sfn_state_machine resource
+fn parse_sfn_state_machine(name: &str, block: &hcl::Block) -> Result<Option<crate::config::StepFunctionConfig>> {
+    let body = &block.body;
+    
+    let machine_name = get_string_attr(body, "name")
+        .unwrap_or_else(|| name.to_string());
+    
+    let machine_type = get_string_attr(body, "type")
+        .unwrap_or_else(|| "STANDARD".to_string());
+    
+    // Definition can be inline string or jsonencode()
+    let definition = get_string_attr(body, "definition")
+        .unwrap_or_else(|| "{}".to_string());
+    
+    let role_arn_ref = get_string_attr(body, "role_arn");
+    
+    Ok(Some(crate::config::StepFunctionConfig {
+        resource_name: name.to_string(),
+        name: machine_name,
+        machine_type,
+        definition,
+        role_arn_ref,
+    }))
+}
+
+/// Parse aws_dynamodb_table resource
+fn parse_dynamodb_table(name: &str, block: &hcl::Block) -> Result<Option<crate::config::DynamoDbTableConfig>> {
+    let body = &block.body;
+    
+    let table_name = get_string_attr(body, "name")
+        .unwrap_or_else(|| name.to_string());
+    
+    let hash_key = get_string_attr(body, "hash_key");
+    let range_key = get_string_attr(body, "range_key");
+    let billing_mode = get_string_attr(body, "billing_mode")
+        .unwrap_or_else(|| "PROVISIONED".to_string());
+    
+    let stream_enabled = get_bool_attr(body, "stream_enabled")
+        .unwrap_or(false);
+    
+    // Parse GSI and LSI names from nested blocks
+    let mut gsi_names = Vec::new();
+    let mut lsi_names = Vec::new();
+    
+    for inner_block in body.blocks() {
+        match inner_block.identifier.as_str() {
+            "global_secondary_index" => {
+                if let Some(idx_name) = get_string_attr(&inner_block.body, "name") {
+                    gsi_names.push(idx_name);
+                }
+            }
+            "local_secondary_index" => {
+                if let Some(idx_name) = get_string_attr(&inner_block.body, "name") {
+                    lsi_names.push(idx_name);
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    Ok(Some(crate::config::DynamoDbTableConfig {
+        resource_name: name.to_string(),
+        name: table_name,
+        hash_key,
+        range_key,
+        billing_mode,
+        gsi_names,
+        lsi_names,
+        stream_enabled,
+    }))
+}
+
+/// Extract resource name from a layer ARN reference like "aws_lambda_layer_version.utils.arn"
+fn extract_layer_resource_name(ref_str: &str) -> Option<String> {
+    let parts: Vec<&str> = ref_str.split('.').collect();
+    if parts.len() >= 2 && parts[0] == "aws_lambda_layer_version" {
+        Some(parts[1].to_string())
+    } else {
+        None
+    }
+}
+
+/// Get a list of traversal attributes (e.g., layers = [aws_lambda_layer_version.x.arn])
+fn get_list_traversal_attrs(body: &hcl::Body, name: &str) -> Vec<String> {
+    body.attributes()
+        .find(|attr| attr.key.to_string() == name)
+        .map(|attr| {
+            match &attr.expr {
+                hcl::Expression::Array(items) => {
+                    items.iter().filter_map(|item| {
+                        match item {
+                            hcl::Expression::Traversal(traversal) => {
+                                let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                                    .chain(traversal.operators.iter().map(|op| {
+                                        match op {
+                                            hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                                            hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                                            _ => String::new(),
+                                        }
+                                    }))
+                                    .collect();
+                                Some(parts.join("."))
+                            }
+                            _ => None,
+                        }
+                    }).collect()
+                }
+                _ => Vec::new(),
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Get a list of string values from an attribute (e.g., compatible_runtimes = ["nodejs20.x"])
+fn get_list_string_attrs(body: &hcl::Body, name: &str) -> Vec<String> {
+    body.attributes()
+        .find(|attr| attr.key.to_string() == name)
+        .map(|attr| {
+            match &attr.expr {
+                hcl::Expression::Array(items) => {
+                    items.iter().filter_map(|item| {
+                        match item {
+                            hcl::Expression::String(s) => Some(s.to_string()),
+                            _ => None,
+                        }
+                    }).collect()
+                }
+                _ => Vec::new(),
+            }
+        })
+        .unwrap_or_default()
 }
 
 /// Parse aws_api_gateway_rest_api resource
@@ -555,7 +745,8 @@ fn parse_api_gateway_rest(name: &str, block: &hcl::Block) -> Result<Option<ApiGa
         resource_name: name.to_string(),
         name: api_name,
         api_type: ApiType::Rest,
-        routes: Vec::new(), // Routes are defined in separate resources
+        routes: Vec::new(),
+        route_selection_expression: None,
     }))
 }
 
@@ -598,6 +789,20 @@ fn get_string_attr(body: &hcl::Body, name: &str) -> Option<String> {
         .and_then(|attr| {
             match &attr.expr {
                 hcl::Expression::String(s) => Some(s.to_string()),
+                hcl::Expression::TemplateExpr(t) => Some(t.to_string()),
+                _ => None,
+            }
+        })
+}
+
+/// Get a boolean attribute from HCL body
+fn get_bool_attr(body: &hcl::Body, name: &str) -> Option<bool> {
+    body.attributes()
+        .find(|attr| attr.key.to_string() == name)
+        .and_then(|attr| {
+            match &attr.expr {
+                hcl::Expression::Bool(b) => Some(*b),
+                hcl::Expression::String(s) => Some(s == "true"),
                 _ => None,
             }
         })
@@ -811,5 +1016,134 @@ resource "aws_api_gateway_integration" "protected" {
         let auth = route.authorizer.as_ref().expect("Route should have authorizer");
         assert_eq!(auth.auth_type, AuthorizerType::Lambda);
         assert_eq!(auth.function_resource, Some("authorizer".to_string()));
+    }
+    
+    #[test]
+    fn test_parse_lambda_layers() {
+        let tf_content = r#"
+resource "aws_lambda_layer_version" "utils" {
+  layer_name          = "utils-layer"
+  filename            = "layers/utils"
+  compatible_runtimes = ["nodejs20.x", "nodejs18.x"]
+}
+
+resource "aws_lambda_layer_version" "common" {
+  layer_name          = "common-layer"
+  filename            = "layers/common"
+  compatible_runtimes = ["nodejs20.x"]
+}
+
+resource "aws_lambda_function" "app" {
+  function_name = "my-app"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "."
+
+  layers = [
+    aws_lambda_layer_version.utils.arn,
+    aws_lambda_layer_version.common.arn
+  ]
+}
+"#;
+        
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+        
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        
+        // Should parse 2 layers
+        assert_eq!(config.layers.len(), 2);
+        
+        let utils = &config.layers[0];
+        assert_eq!(utils.resource_name, "utils");
+        assert_eq!(utils.layer_name, "utils-layer");
+        assert_eq!(utils.source_path, Some(std::path::PathBuf::from("layers/utils")));
+        assert_eq!(utils.compatible_runtimes, vec!["nodejs20.x", "nodejs18.x"]);
+        
+        let common = &config.layers[1];
+        assert_eq!(common.resource_name, "common");
+        assert_eq!(common.layer_name, "common-layer");
+        
+        // Function should reference both layers
+        assert_eq!(config.functions.len(), 1);
+        let func = &config.functions[0];
+        assert_eq!(func.layers, vec!["utils", "common"]);
+    }
+    
+    #[test]
+    fn test_parse_dynamodb_tables() {
+        let tf_content = r#"
+resource "aws_dynamodb_table" "users" {
+  name         = "users-table"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "userId"
+  range_key    = "sortKey"
+
+  attribute {
+    name = "userId"
+    type = "S"
+  }
+
+  attribute {
+    name = "sortKey"
+    type = "S"
+  }
+
+  attribute {
+    name = "email"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "email-index"
+    hash_key        = "email"
+    projection_type = "ALL"
+  }
+
+  local_secondary_index {
+    name            = "sort-by-date"
+    range_key       = "createdAt"
+    projection_type = "ALL"
+  }
+
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+}
+
+resource "aws_dynamodb_table" "sessions" {
+  name         = "sessions-table"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "sessionId"
+
+  attribute {
+    name = "sessionId"
+    type = "S"
+  }
+}
+"#;
+        
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+        
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.dynamodb_tables.len(), 2);
+        
+        let users = &config.dynamodb_tables[0];
+        assert_eq!(users.name, "users-table");
+        assert_eq!(users.hash_key, Some("userId".to_string()));
+        assert_eq!(users.range_key, Some("sortKey".to_string()));
+        assert_eq!(users.billing_mode, "PAY_PER_REQUEST");
+        assert_eq!(users.gsi_names, vec!["email-index"]);
+        assert_eq!(users.lsi_names, vec!["sort-by-date"]);
+        assert!(users.stream_enabled);
+        
+        let sessions = &config.dynamodb_tables[1];
+        assert_eq!(sessions.name, "sessions-table");
+        assert_eq!(sessions.hash_key, Some("sessionId".to_string()));
+        assert_eq!(sessions.range_key, None);
+        assert!(sessions.gsi_names.is_empty());
+        assert!(!sessions.stream_enabled);
     }
 }

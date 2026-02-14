@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::config::{ApiGatewayConfig, LambdaformConfig};
+use crate::config::{ApiGatewayConfig, LambdaConfig, LambdaformConfig};
 use crate::pool::ProcessPool;
 use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
@@ -452,6 +452,7 @@ async fn handle_request(
     // Clone what we need before dropping the lock
     let function = matched.function.clone();
     let authorizer_function = matched.authorizer_function.cloned();
+    let layers_config = inner.config.layers.clone();
     drop(inner);
 
     // Execute authorizer if present
@@ -496,10 +497,14 @@ async fn handle_request(
         }
     }
 
+    // Resolve layer paths for this function
+    let layer_paths = resolve_layer_paths(&function, &layers_config, &state.source_dir);
+
     // Execute function
     let executor = FunctionExecutor::new(function.clone(), state.source_dir.clone())
         .with_debug(state.debug.clone())
-        .with_pool(Some(state.pool.clone()));
+        .with_pool(Some(state.pool.clone()))
+        .with_layer_paths(layer_paths);
 
     match executor.invoke(event).await {
         Ok(response) => {
@@ -616,4 +621,55 @@ mod tests {
         };
         let _layer = build_cors_layer(Some(&config));
     }
+}
+
+/// Resolve layer paths for a Lambda function.
+/// Looks up each layer reference in the config and resolves to a directory path.
+pub fn resolve_layer_paths(
+    function: &LambdaConfig,
+    layers: &[crate::config::LayerConfig],
+    source_dir: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    function.layers.iter().filter_map(|layer_ref| {
+        // Find the layer config by resource name
+        let layer = layers.iter().find(|l| l.resource_name == *layer_ref)?;
+        
+        // Resolve the layer source path
+        if let Some(src) = &layer.source_path {
+            let path = if src.is_absolute() {
+                src.clone()
+            } else {
+                source_dir.join(src)
+            };
+            
+            // If it's a zip file, check for extracted directory alongside it
+            let resolved = if path.extension().map_or(false, |e| e == "zip") {
+                // Look for a directory with the same name minus .zip
+                let dir = path.with_extension("");
+                if dir.is_dir() {
+                    dir
+                } else {
+                    // Try using the zip path parent as the layer dir
+                    path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+                }
+            } else if path.is_dir() {
+                path
+            } else {
+                // Could be a directory path
+                path
+            };
+            
+            if resolved.exists() {
+                let resolved = resolved.canonicalize().unwrap_or(resolved);
+                tracing::info!("📦 Layer '{}' resolved to: {}", layer.layer_name, resolved.display());
+                Some(resolved)
+            } else {
+                tracing::warn!("⚠️ Layer '{}' path not found: {}", layer.layer_name, resolved.display());
+                None
+            }
+        } else {
+            tracing::warn!("⚠️ Layer '{}' has no source_path configured", layer.layer_name);
+            None
+        }
+    }).collect()
 }

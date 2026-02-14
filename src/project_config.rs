@@ -268,8 +268,12 @@ environment:
                 environment: HashMap::new(),
                 timeout: 3,
                 memory_size: 128,
+                layers: vec![],
             }],
             gateways: vec![],
+            layers: vec![],
+            state_machines: vec![],
+            dynamodb_tables: vec![],
         };
         proj.apply(&mut config);
         assert_eq!(config.functions[0].environment.get("STAGE").unwrap(), "local");
