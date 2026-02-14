@@ -12,6 +12,7 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 
 use crate::config::{LambdaConfig, Runtime};
+use crate::pool::ProcessPool;
 
 /// Lambda event structure (API Gateway proxy format v1)
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +61,7 @@ pub struct LambdaContext {
 }
 
 /// Lambda response structure
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LambdaResponse {
@@ -101,6 +103,7 @@ pub struct AuthorizerEvent {
 
 /// Result from authorizer Lambda execution
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthorizerResult {
     pub is_authorized: bool,
     pub context: Option<HashMap<String, serde_json::Value>>,
@@ -126,16 +129,27 @@ pub struct FunctionExecutor {
     config: LambdaConfig,
     source_dir: std::path::PathBuf,
     debug: Option<DebugOptions>,
+    pool: Option<Arc<ProcessPool>>,
 }
 
 impl FunctionExecutor {
     pub fn new(config: LambdaConfig, source_dir: std::path::PathBuf) -> Self {
-        Self { config, source_dir, debug: None }
+        Self { config, source_dir, debug: None, pool: None }
     }
 
     pub fn with_debug(mut self, debug: Option<DebugOptions>) -> Self {
         self.debug = debug;
         self
+    }
+
+    pub fn with_pool(mut self, pool: Option<Arc<ProcessPool>>) -> Self {
+        self.pool = pool;
+        self
+    }
+
+    /// Whether to use the process pool (not in debug mode).
+    fn use_pool(&self) -> bool {
+        self.pool.is_some() && self.debug.is_none()
     }
     
     /// Invoke the Lambda function as an authorizer
@@ -494,6 +508,27 @@ except Exception as e:
             "context": context,
         });
         
+        // Use pool for Node.js/Python when available and not debugging
+        if self.use_pool() {
+            match &self.config.runtime {
+                Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
+                    let pool = self.pool.as_ref().unwrap();
+                    let result = pool.invoke(
+                        &self.config.function_name,
+                        &self.config.runtime,
+                        &self.config.handler,
+                        &self.source_dir,
+                        &self.config.environment,
+                        &payload["event"],
+                        &payload["context"],
+                    ).await?;
+                    let response: LambdaResponse = serde_json::from_value(result)?;
+                    return Ok(response);
+                }
+                _ => {}
+            }
+        }
+
         match &self.config.runtime {
             Runtime::Nodejs18 | Runtime::Nodejs20 => {
                 self.invoke_nodejs(&payload).await
@@ -725,7 +760,7 @@ except Exception as e:
 }
 
 /// Find handler file by searching common locations. Returns canonical (absolute) path.
-fn find_handler_file(source_dir: &std::path::Path, file: &str, ext: &str) -> Result<std::path::PathBuf> {
+pub fn find_handler_file(source_dir: &std::path::Path, file: &str, ext: &str) -> Result<std::path::PathBuf> {
     let filename = format!("{}.{}", file, ext);
     
     // Search order: root, src/, lib/, lambda/
@@ -753,7 +788,7 @@ fn find_handler_file(source_dir: &std::path::Path, file: &str, ext: &str) -> Res
 }
 
 /// Parse handler string (e.g., "index.handler" -> ("index", "handler"))
-fn parse_handler(handler: &str) -> Result<(&str, &str)> {
+pub fn parse_handler(handler: &str) -> Result<(&str, &str)> {
     let parts: Vec<&str> = handler.rsplitn(2, '.').collect();
     if parts.len() != 2 {
         anyhow::bail!("Invalid handler format: {}", handler);
@@ -768,4 +803,125 @@ fn uuid_simple() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap();
     format!("{:x}-{:x}", duration.as_secs(), duration.subsec_nanos())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_parse_handler_basic() {
+        let (file, func) = parse_handler("index.handler").unwrap();
+        assert_eq!(file, "index");
+        assert_eq!(func, "handler");
+    }
+
+    #[test]
+    fn test_parse_handler_nested() {
+        let (file, func) = parse_handler("src/app.main").unwrap();
+        assert_eq!(file, "src/app");
+        assert_eq!(func, "main");
+    }
+
+    #[test]
+    fn test_parse_handler_invalid() {
+        assert!(parse_handler("nohandler").is_err());
+    }
+
+    #[test]
+    fn test_find_handler_file_root() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("index.js"), "// handler").unwrap();
+        let result = find_handler_file(dir.path(), "index", "js").unwrap();
+        assert!(result.exists());
+        assert!(result.to_string_lossy().contains("index.js"));
+    }
+
+    #[test]
+    fn test_find_handler_file_src_subdir() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("app.py"), "# handler").unwrap();
+        let result = find_handler_file(dir.path(), "app", "py").unwrap();
+        assert!(result.exists());
+    }
+
+    #[test]
+    fn test_find_handler_file_not_found() {
+        let dir = TempDir::new().unwrap();
+        assert!(find_handler_file(dir.path(), "missing", "js").is_err());
+    }
+
+    #[test]
+    fn test_uuid_simple_format() {
+        let id = uuid_simple();
+        assert!(id.contains('-'));
+        // Should be hex characters and a dash
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+    }
+
+    #[test]
+    fn test_lambda_event_serialization() {
+        let event = LambdaEvent {
+            http_method: "GET".to_string(),
+            path: "/test".to_string(),
+            resource: "/test".to_string(),
+            path_parameters: None,
+            query_string_parameters: Some(HashMap::from([("key".to_string(), "val".to_string())])),
+            headers: None,
+            body: None,
+            is_base64_encoded: false,
+            request_context: RequestContext {
+                stage: "local".to_string(),
+                resource_path: "/test".to_string(),
+                http_method: "GET".to_string(),
+                request_id: "test-123".to_string(),
+                api_id: "lambdaform".to_string(),
+                path: "/test".to_string(),
+                identity: RequestIdentity { source_ip: "127.0.0.1".to_string() },
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["httpMethod"], "GET");
+        assert_eq!(json["path"], "/test");
+        assert_eq!(json["queryStringParameters"]["key"], "val");
+        assert_eq!(json["requestContext"]["stage"], "local");
+    }
+
+    #[test]
+    fn test_lambda_response_deserialization() {
+        let json = r#"{"statusCode": 200, "body": "hello", "headers": {"x-custom": "value"}}"#;
+        let resp: LambdaResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body, Some("hello".to_string()));
+        assert_eq!(resp.headers.unwrap()["x-custom"], "value");
+        assert!(!resp.is_base64_encoded);
+    }
+
+    #[test]
+    fn test_lambda_response_minimal() {
+        let json = r#"{"statusCode": 204}"#;
+        let resp: LambdaResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status_code, 204);
+        assert!(resp.body.is_none());
+        assert!(resp.headers.is_none());
+    }
+
+    #[test]
+    fn test_authorizer_event_serialization() {
+        let event = AuthorizerEvent {
+            auth_type: "TOKEN".to_string(),
+            authorization_token: Some("Bearer xyz".to_string()),
+            method_arn: "arn:aws:execute-api:local:000:api/GET/test".to_string(),
+            http_method: "GET".to_string(),
+            path: "/test".to_string(),
+            headers: None,
+            query_string_parameters: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "TOKEN");
+        assert_eq!(json["authorizationToken"], "Bearer xyz");
+    }
 }

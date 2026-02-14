@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::{ApiGatewayConfig, LambdaformConfig};
+use crate::pool::ProcessPool;
 use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
 use crate::runtime::{DebugOptions, FunctionExecutor, LambdaEvent};
@@ -33,6 +34,8 @@ pub struct AppState {
     pub debug: Option<DebugOptions>,
     /// Which gateway this state serves (None = all gateways merged)
     pub gateway_resource: Option<String>,
+    /// Warm process pool for Node.js/Python workers
+    pub pool: Arc<ProcessPool>,
 }
 
 /// The reloadable portion of app state
@@ -50,6 +53,7 @@ impl AppState {
             source_dir,
             debug,
             gateway_resource: None,
+            pool: Arc::new(ProcessPool::new()),
         }
     }
 
@@ -61,6 +65,7 @@ impl AppState {
             source_dir,
             debug,
             gateway_resource: Some(gateway.resource_name.clone()),
+            pool: Arc::new(ProcessPool::new()),
         }
     }
 
@@ -294,6 +299,7 @@ fn start_watcher(
                 tracing::info!("📝 Terraform changed: {}", path.display());
                 let state = state.clone();
                 rt_handle.spawn(async move {
+                    state.pool.invalidate_all().await;
                     if let Err(e) = state.reload().await {
                         tracing::error!("❌ Reload failed: {}", e);
                     }
@@ -301,9 +307,13 @@ fn start_watcher(
             }
             FileChange::Source(path) => {
                 tracing::info!(
-                    "📝 Source changed: {} (will use on next invocation)",
+                    "📝 Source changed: {} — killing warm workers",
                     path.display()
                 );
+                let pool = state.pool.clone();
+                rt_handle.spawn(async move {
+                    pool.invalidate_all().await;
+                });
             }
         }
     })?;
@@ -461,7 +471,8 @@ async fn handle_request(
         };
 
         let auth_executor = FunctionExecutor::new(auth_fn, state.source_dir.clone())
-            .with_debug(state.debug.clone());
+            .with_debug(state.debug.clone())
+            .with_pool(Some(state.pool.clone()));
         match auth_executor.invoke_authorizer(auth_event).await {
             Ok(result) => {
                 if !result.is_authorized {
@@ -487,7 +498,8 @@ async fn handle_request(
 
     // Execute function
     let executor = FunctionExecutor::new(function.clone(), state.source_dir.clone())
-        .with_debug(state.debug.clone());
+        .with_debug(state.debug.clone())
+        .with_pool(Some(state.pool.clone()));
 
     match executor.invoke(event).await {
         Ok(response) => {
@@ -526,5 +538,82 @@ async fn handle_request(
             tracing::error!("← ❌ 500 {} {} [{}] error: {}", method, path, format_duration(duration), e);
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_duration_microseconds() {
+        let d = std::time::Duration::from_micros(500);
+        assert_eq!(format_duration(d), "500µs");
+    }
+
+    #[test]
+    fn test_format_duration_milliseconds() {
+        let d = std::time::Duration::from_millis(42);
+        let s = format_duration(d);
+        assert!(s.contains("ms"), "Expected ms, got: {}", s);
+    }
+
+    #[test]
+    fn test_format_duration_seconds() {
+        let d = std::time::Duration::from_secs(2);
+        let s = format_duration(d);
+        assert!(s.contains("s"), "Expected seconds, got: {}", s);
+        assert!(s.starts_with("2.00"));
+    }
+
+    #[test]
+    fn test_format_bytes_small() {
+        assert_eq!(format_bytes(42), "42B");
+        assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(1023), "1023B");
+    }
+
+    #[test]
+    fn test_format_bytes_kilobytes() {
+        let s = format_bytes(2048);
+        assert!(s.contains("KB"), "Expected KB, got: {}", s);
+    }
+
+    #[test]
+    fn test_format_bytes_megabytes() {
+        let s = format_bytes(2 * 1024 * 1024);
+        assert!(s.contains("MB"), "Expected MB, got: {}", s);
+    }
+
+    #[test]
+    fn test_build_cors_layer_default() {
+        // Should not panic with None config
+        let _layer = build_cors_layer(None);
+    }
+
+    #[test]
+    fn test_build_cors_layer_custom() {
+        let config = CorsConfig {
+            allow_origins: vec!["https://example.com".to_string()],
+            allow_methods: vec!["GET".to_string(), "POST".to_string()],
+            allow_headers: vec!["Authorization".to_string()],
+            expose_headers: vec!["X-Custom".to_string()],
+            allow_credentials: true,
+            max_age: Some(3600),
+        };
+        let _layer = build_cors_layer(Some(&config));
+    }
+
+    #[test]
+    fn test_build_cors_layer_wildcard() {
+        let config = CorsConfig {
+            allow_origins: vec!["*".to_string()],
+            allow_methods: vec![],
+            allow_headers: vec!["*".to_string()],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age: None,
+        };
+        let _layer = build_cors_layer(Some(&config));
     }
 }

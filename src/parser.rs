@@ -32,6 +32,7 @@ pub fn parse_terraform_dir(dir: &Path) -> Result<LambdaformConfig> {
 }
 
 /// Intermediate structs for collecting API Gateway resources before resolving
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct ApigwResource {
     resource_name: String,
@@ -40,6 +41,7 @@ struct ApigwResource {
     path_part: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct ApigwMethod {
     resource_name: String,
@@ -49,6 +51,7 @@ struct ApigwMethod {
     authorizer_ref: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct ApigwIntegration {
     rest_api_ref: String,
@@ -58,6 +61,7 @@ struct ApigwIntegration {
 }
 
 /// API Gateway authorizer intermediate structs
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct ApigwAuthorizer {
     resource_name: String,
@@ -66,6 +70,7 @@ struct ApigwAuthorizer {
     auth_type: String, // TOKEN, REQUEST, COGNITO_USER_POOLS
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Apigwv2Authorizer {
     resource_name: String,
@@ -75,6 +80,7 @@ struct Apigwv2Authorizer {
 }
 
 /// HTTP API Gateway v2 intermediate structs
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Apigwv2Route {
     resource_name: String,

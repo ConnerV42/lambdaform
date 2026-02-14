@@ -8,6 +8,7 @@ use walkdir::WalkDir;
 
 mod config;
 mod parser;
+mod pool;
 mod project_config;
 mod router;
 mod runtime;

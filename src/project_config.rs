@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level project config (lambdaform.yaml)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
