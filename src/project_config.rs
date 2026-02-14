@@ -43,9 +43,17 @@ pub struct DebugConfig {
     #[serde(default)]
     pub nodejs: bool,
 
+    /// Enable Python debugpy (default: false)
+    #[serde(default)]
+    pub python: bool,
+
     /// Inspector port for Node.js (default: 9229)
     #[serde(default = "default_debug_port")]
     pub port: u16,
+
+    /// Debug port for Python/debugpy (default: 5678)
+    #[serde(default = "default_python_debug_port")]
+    pub python_port: u16,
 
     /// Break on first line (default: true, uses --inspect-brk)
     #[serde(default = "default_true")]
@@ -53,6 +61,19 @@ pub struct DebugConfig {
 }
 
 fn default_debug_port() -> u16 { 9229 }
+fn default_python_debug_port() -> u16 { 5678 }
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self {
+            nodejs: false,
+            python: false,
+            port: default_debug_port(),
+            python_port: default_python_debug_port(),
+            break_on_start: default_true(),
+        }
+    }
+}
 fn default_true() -> bool { true }
 
 /// CORS configuration

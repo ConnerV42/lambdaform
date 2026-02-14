@@ -111,8 +111,12 @@ pub struct AuthorizerResult {
 pub struct DebugOptions {
     /// Enable Node.js inspector
     pub nodejs: bool,
-    /// Inspector port (default: 9229)
+    /// Enable Python debugpy
+    pub python: bool,
+    /// Inspector port for Node.js (default: 9229)
     pub port: u16,
+    /// Debug port for Python/debugpy (default: 5678)
+    pub python_port: u16,
     /// Break on first line (--inspect-brk vs --inspect)
     pub break_on_start: bool,
 }
@@ -612,12 +616,35 @@ process.stdin.once('data', async (data) => {{
         
         let handler_path = find_handler_file(&self.source_dir, file, "py")?;
         
+        // Check if debug mode is enabled for Python
+        let debug_enabled = self.debug.as_ref().map_or(false, |d| d.python);
+        
+        let debug_preamble = if debug_enabled {
+            let debug_opts = self.debug.as_ref().unwrap();
+            let port = debug_opts.python_port;
+            let wait = if debug_opts.break_on_start { "True" } else { "False" };
+            tracing::info!("🐍 Python debugger (debugpy) listening on 0.0.0.0:{}", port);
+            tracing::info!("   Attach VS Code or any DAP client to debug");
+            format!(
+                r#"
+import debugpy
+debugpy.listen(("0.0.0.0", {}))
+if {}:
+    print("⏳ Waiting for debugger to attach...", file=__import__('sys').stderr)
+    debugpy.wait_for_client()
+"#,
+                port, wait
+            )
+        } else {
+            String::new()
+        };
+        
         let bootstrap = format!(
             r#"
 import sys
 import json
 import importlib.util
-
+{}
 spec = importlib.util.spec_from_file_location("handler", "{}")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -630,13 +657,29 @@ try:
 except Exception as e:
     print(json.dumps({{"success": False, "error": str(e)}}))
 "#,
+            debug_preamble,
             handler_path.display(),
             func
         );
         
-        let mut child = Command::new("python3")
-            .arg("-c")
-            .arg(&bootstrap)
+        // When debugging, write bootstrap to a temp file for better source visibility
+        let _temp_file;
+        let mut cmd = Command::new("python3");
+        
+        if debug_enabled {
+            let tmp = std::env::temp_dir().join(format!("lambdaform-bootstrap-{}.py",
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_nanos()));
+            std::fs::write(&tmp, &bootstrap)
+                .context("Failed to write debug bootstrap file")?;
+            cmd.arg(&tmp);
+            _temp_file = Some(tmp);
+        } else {
+            cmd.arg("-c").arg(&bootstrap);
+            _temp_file = None;
+        }
+        
+        let mut child = cmd
             .current_dir(&self.source_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

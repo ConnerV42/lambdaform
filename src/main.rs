@@ -50,6 +50,14 @@ enum Commands {
         /// Node.js debugger port (default: 9229)
         #[arg(long, default_value = "9229")]
         debug_port: u16,
+
+        /// Enable Python debugger (debugpy)
+        #[arg(long)]
+        debug_python: bool,
+
+        /// Python debugger port (default: 5678)
+        #[arg(long, default_value = "5678")]
+        debug_python_port: u16,
     },
 
     /// Invoke a Lambda function directly
@@ -99,9 +107,9 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Start { port, dir, watch, verbose: _, debug, debug_port } => {
+        Commands::Start { port, dir, watch, verbose: _, debug, debug_port, debug_python, debug_python_port } => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(cmd_start(port, dir, watch, debug, debug_port))
+            rt.block_on(cmd_start(port, dir, watch, debug, debug_port, debug_python, debug_python_port))
         }
         Commands::Invoke {
             function,
@@ -119,7 +127,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port: u16) -> anyhow::Result<()> {
+async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port: u16, debug_python: bool, debug_python_port: u16) -> anyhow::Result<()> {
     println!(
         r#"
 ┌─────────────────────────────────────────┐
@@ -192,35 +200,41 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port
 
     // Build debug options from CLI flags and/or project config
     let debug_from_config = project_config.as_ref().and_then(|pc| pc.debug.clone());
-    let debug_options = if debug {
+    
+    let has_any_debug = debug || debug_python || debug_from_config.as_ref().map_or(false, |dc| dc.nodejs || dc.python);
+    
+    let debug_options = if has_any_debug {
+        let dc = debug_from_config.unwrap_or_default();
         Some(runtime::DebugOptions {
-            nodejs: true,
-            port: debug_port,
-            break_on_start: true,
+            nodejs: debug || dc.nodejs,
+            python: debug_python || dc.python,
+            port: if debug { debug_port } else { dc.port },
+            python_port: if debug_python { debug_python_port } else { dc.python_port },
+            break_on_start: if debug || debug_python { true } else { dc.break_on_start },
         })
-    } else if let Some(dc) = debug_from_config {
-        if dc.nodejs {
-            Some(runtime::DebugOptions {
-                nodejs: true,
-                port: dc.port,
-                break_on_start: dc.break_on_start,
-            })
-        } else {
-            None
-        }
     } else {
         None
     };
 
-    if debug_options.is_some() {
-        let opts = debug_options.as_ref().unwrap();
-        println!("\n🔍 Node.js debugger enabled on port {}", opts.port);
-        if opts.break_on_start {
-            println!("   Mode: --inspect-brk (pauses on first line)");
-        } else {
-            println!("   Mode: --inspect (runs immediately)");
+    if let Some(ref opts) = debug_options {
+        if opts.nodejs {
+            println!("\n🔍 Node.js debugger enabled on port {}", opts.port);
+            if opts.break_on_start {
+                println!("   Mode: --inspect-brk (pauses on first line)");
+            } else {
+                println!("   Mode: --inspect (runs immediately)");
+            }
+            println!("   Attach: chrome://inspect or VS Code \"Attach to Node.js\"");
         }
-        println!("   Attach: chrome://inspect or VS Code \"Attach to Node.js\"");
+        if opts.python {
+            println!("\n🐍 Python debugger (debugpy) enabled on port {}", opts.python_port);
+            if opts.break_on_start {
+                println!("   Mode: wait_for_client (pauses until debugger attaches)");
+            } else {
+                println!("   Mode: listen only (runs immediately)");
+            }
+            println!("   Attach: VS Code \"Python: Remote Attach\" → localhost:{}", opts.python_port);
+        }
     }
 
     // Start HTTP server (blocks until shutdown)
