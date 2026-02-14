@@ -267,6 +267,20 @@ fn resolve_api_gateway_routes(
         .map(|r| (r.resource_name.clone(), r.path_part.clone()))
         .collect();
     
+    // Build resource name → parent resource name lookup for nested path resolution
+    let resource_parents: HashMap<String, String> = resources
+        .iter()
+        .filter_map(|r| {
+            let parent_name = extract_resource_name_from_ref(&r.parent_ref);
+            // Only include if parent is another resource (not a root_resource_id)
+            if resource_paths.contains_key(&parent_name) {
+                Some((r.resource_name.clone(), parent_name))
+            } else {
+                None
+            }
+        })
+        .collect();
+    
     // Build authorizer name → AuthorizerConfig lookup
     let authorizer_map: HashMap<String, AuthorizerConfig> = authorizers
         .iter()
@@ -314,7 +328,27 @@ fn resolve_api_gateway_routes(
             })
         });
         
-        let path = format!("/{}", path_part);
+        // Walk parent chain to build full nested path (e.g. /api/v1/users/{id})
+        let path = {
+            let mut parts = vec![path_part.as_str()];
+            let mut current = apigw_resource_name.as_str();
+            // Walk up parent_ref chain, max 20 levels to prevent infinite loops
+            for _ in 0..20 {
+                match resource_parents.get(current) {
+                    Some(parent_name) => {
+                        if let Some(parent_path) = resource_paths.get(parent_name) {
+                            parts.push(parent_path.as_str());
+                            current = parent_name.as_str();
+                        } else {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            parts.reverse();
+            format!("/{}", parts.join("/"))
+        };
         
         let route = RouteConfig {
             method: http_method,
@@ -1232,5 +1266,98 @@ resource "aws_dynamodb_table" "sessions" {
         assert_eq!(sessions.range_key, None);
         assert!(sessions.gsi_names.is_empty());
         assert!(!sessions.stream_enabled);
+    }
+    
+    #[test]
+    fn test_nested_apigw_v1_resources() {
+        let tf_content = r#"
+resource "aws_lambda_function" "users" {
+  function_name = "users-api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+}
+
+resource "aws_api_gateway_rest_api" "api" {
+  name = "nested-api"
+}
+
+resource "aws_api_gateway_resource" "api_root" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_rest_api.api.root_resource_id
+  path_part   = "api"
+}
+
+resource "aws_api_gateway_resource" "v1" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_resource.api_root.id
+  path_part   = "v1"
+}
+
+resource "aws_api_gateway_resource" "users" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_resource.v1.id
+  path_part   = "users"
+}
+
+resource "aws_api_gateway_resource" "user_id" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_resource.users.id
+  path_part   = "{id}"
+}
+
+resource "aws_api_gateway_method" "get_user" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.user_id.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "get_user" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  resource_id = aws_api_gateway_resource.user_id.id
+  http_method = aws_api_gateway_method.get_user.http_method
+  type        = "AWS_PROXY"
+  uri         = aws_lambda_function.users.invoke_arn
+}
+
+resource "aws_api_gateway_method" "list_users" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.users.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "list_users" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  resource_id = aws_api_gateway_resource.users.id
+  http_method = aws_api_gateway_method.list_users.http_method
+  type        = "AWS_PROXY"
+  uri         = aws_lambda_function.users.invoke_arn
+}
+"#;
+        
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+        
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        
+        assert_eq!(config.gateways.len(), 1);
+        let gw = &config.gateways[0];
+        assert_eq!(gw.routes.len(), 2);
+        
+        // Sort routes by path for deterministic assertions
+        let mut routes: Vec<_> = gw.routes.iter().collect();
+        routes.sort_by_key(|r| r.path.clone());
+        
+        // GET /api/v1/users
+        assert_eq!(routes[0].path, "/api/v1/users");
+        assert_eq!(routes[0].method, HttpMethod::Get);
+        assert_eq!(routes[0].function_resource, "users");
+        
+        // GET /api/v1/users/{id}
+        assert_eq!(routes[1].path, "/api/v1/users/{id}");
+        assert_eq!(routes[1].method, HttpMethod::Get);
+        assert_eq!(routes[1].function_resource, "users");
     }
 }
