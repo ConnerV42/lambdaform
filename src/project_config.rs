@@ -33,6 +33,18 @@ pub struct ProjectConfig {
 
     /// Debug configuration
     pub debug: Option<DebugConfig>,
+
+    /// Per-gateway overrides (keyed by resource name)
+    #[serde(default)]
+    pub gateways: HashMap<String, GatewayOverride>,
+}
+
+/// Per-gateway overrides
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayOverride {
+    /// Override the port for this gateway
+    pub port: Option<u16>,
 }
 
 /// Debug configuration

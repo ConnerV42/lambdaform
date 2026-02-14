@@ -1,0 +1,3 @@
+gateways:
+  http_api:
+    port: 4000

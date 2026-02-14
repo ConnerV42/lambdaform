@@ -13,16 +13,26 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::config::LambdaformConfig;
+use crate::config::{ApiGatewayConfig, LambdaformConfig};
 use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
 use crate::runtime::{DebugOptions, FunctionExecutor, LambdaEvent};
+
+/// Gateway assignment: which gateway runs on which port
+#[derive(Debug, Clone)]
+pub struct GatewayBinding {
+    pub gateway_name: String,
+    pub gateway_resource: String,
+    pub port: u16,
+}
 
 /// Shared application state (behind RwLock for hot reload)
 pub struct AppState {
     pub inner: RwLock<AppStateInner>,
     pub source_dir: std::path::PathBuf,
     pub debug: Option<DebugOptions>,
+    /// Which gateway this state serves (None = all gateways merged)
+    pub gateway_resource: Option<String>,
 }
 
 /// The reloadable portion of app state
@@ -32,30 +42,60 @@ pub struct AppStateInner {
 }
 
 impl AppState {
+    /// Create state for all gateways merged (backward compat / single gateway)
     pub fn new(config: LambdaformConfig, source_dir: std::path::PathBuf, debug: Option<DebugOptions>) -> Self {
         let router = LambdaRouter::new(&config.gateways, &config.functions);
         Self {
             inner: RwLock::new(AppStateInner { router, config }),
             source_dir,
             debug,
+            gateway_resource: None,
+        }
+    }
+
+    /// Create state for a single gateway
+    pub fn for_gateway(config: LambdaformConfig, gateway: &ApiGatewayConfig, source_dir: std::path::PathBuf, debug: Option<DebugOptions>) -> Self {
+        let router = LambdaRouter::for_gateway(gateway, &config.functions);
+        Self {
+            inner: RwLock::new(AppStateInner { router, config }),
+            source_dir,
+            debug,
+            gateway_resource: Some(gateway.resource_name.clone()),
         }
     }
 
     /// Reload configuration from Terraform files
     pub async fn reload(&self) -> anyhow::Result<()> {
         let new_config = crate::parser::parse_terraform_dir(&self.source_dir)?;
-        let new_router = LambdaRouter::new(&new_config.gateways, &new_config.functions);
+
+        let new_router = if let Some(ref gw_resource) = self.gateway_resource {
+            // Rebuild router for just this gateway
+            if let Some(gw) = new_config.gateways.iter().find(|g| g.resource_name == *gw_resource) {
+                LambdaRouter::for_gateway(gw, &new_config.functions)
+            } else {
+                tracing::warn!("⚠️ Gateway '{}' not found after reload", gw_resource);
+                LambdaRouter::new(&[], &new_config.functions)
+            }
+        } else {
+            LambdaRouter::new(&new_config.gateways, &new_config.functions)
+        };
 
         let mut inner = self.inner.write().await;
         let fn_count = new_config.functions.len();
-        let route_count: usize = new_config.gateways.iter().map(|g| g.routes.len()).sum();
+        let route_count = match &self.gateway_resource {
+            Some(res) => new_config.gateways.iter()
+                .find(|g| g.resource_name == *res)
+                .map(|g| g.routes.len()).unwrap_or(0),
+            None => new_config.gateways.iter().map(|g| g.routes.len()).sum(),
+        };
         inner.config = new_config;
         inner.router = new_router;
 
         tracing::info!(
-            "🔄 Reloaded: {} functions, {} routes",
+            "🔄 Reloaded: {} functions, {} routes{}",
             fn_count,
-            route_count
+            route_count,
+            self.gateway_resource.as_ref().map(|r| format!(" ({})", r)).unwrap_or_default()
         );
         Ok(())
     }
@@ -121,7 +161,7 @@ fn build_cors_layer(cors_config: Option<&CorsConfig>) -> CorsLayer {
     layer
 }
 
-/// Start the HTTP server
+/// Start the HTTP server (single port, all gateways merged)
 pub async fn start_server(
     config: LambdaformConfig,
     source_dir: std::path::PathBuf,
@@ -147,7 +187,64 @@ pub async fn start_server(
     Ok(())
 }
 
-/// Start the HTTP server with hot reload watcher
+/// Start multiple servers, one per gateway binding
+pub async fn start_multi_gateway(
+    config: LambdaformConfig,
+    source_dir: std::path::PathBuf,
+    bindings: Vec<GatewayBinding>,
+    watch: bool,
+    cors_config: Option<&CorsConfig>,
+    debug: Option<DebugOptions>,
+) -> anyhow::Result<()> {
+    let mut handles = Vec::new();
+    let mut watch_handles = Vec::new();
+
+    for binding in &bindings {
+        let gateway = config.gateways.iter()
+            .find(|g| g.resource_name == binding.gateway_resource)
+            .ok_or_else(|| anyhow::anyhow!("Gateway '{}' not found", binding.gateway_resource))?;
+
+        let state = Arc::new(AppState::for_gateway(
+            config.clone(),
+            gateway,
+            source_dir.clone(),
+            debug.clone(),
+        ));
+
+        if watch {
+            let wh = start_watcher(source_dir.clone(), state.clone())?;
+            watch_handles.push(wh);
+        }
+
+        let cors = build_cors_layer(cors_config);
+        let app = Router::new()
+            .route("/*path", any(handle_request))
+            .route("/", any(handle_request))
+            .layer(cors)
+            .with_state(state);
+
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], binding.port));
+        let gw_name = binding.gateway_name.clone();
+
+        let handle = tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::bind(addr).await
+                .map_err(|e| anyhow::anyhow!("Failed to bind {} on port {}: {}", gw_name, addr.port(), e))?;
+            tracing::info!("🌐 {} listening on http://{}", gw_name, addr);
+            axum::serve(listener, app).await
+                .map_err(|e| anyhow::anyhow!("Server error for {}: {}", gw_name, e))
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for any server to finish (or error out)
+    let (result, _, _) = futures::future::select_all(handles).await;
+    result??;
+
+    Ok(())
+}
+
+/// Start the HTTP server with hot reload watcher (single port, all gateways merged)
 pub async fn start_server_with_watch(
     config: LambdaformConfig,
     source_dir: std::path::PathBuf,

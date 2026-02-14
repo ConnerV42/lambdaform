@@ -172,12 +172,41 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port
         println!("   • {} ({:?}) → {}", f.function_name, f.runtime, f.handler);
     }
 
+    // Compute gateway bindings (each gateway gets its own port when multiple exist)
+    let multi_gateway = config.gateways.len() > 1;
+    let gateway_bindings: Vec<server::GatewayBinding> = if multi_gateway {
+        config.gateways.iter().enumerate().map(|(i, gw)| {
+            let gw_port = project_config.as_ref()
+                .and_then(|pc| pc.gateways.get(&gw.resource_name))
+                .and_then(|ovr| ovr.port)
+                .unwrap_or(port + i as u16);
+            server::GatewayBinding {
+                gateway_name: gw.name.clone(),
+                gateway_resource: gw.resource_name.clone(),
+                port: gw_port,
+            }
+        }).collect()
+    } else {
+        vec![]
+    };
+
     // Log discovered routes
     if !config.gateways.is_empty() {
-        println!("\n🌐 Routes:");
-        for gw in &config.gateways {
-            for route in &gw.routes {
-                println!("   {:?} {} → {}", route.method, route.path, route.function_resource);
+        if multi_gateway {
+            println!("\n🌐 API Gateways ({}):", config.gateways.len());
+            for binding in &gateway_bindings {
+                let gw = config.gateways.iter().find(|g| g.resource_name == binding.gateway_resource).unwrap();
+                println!("   📡 {} ({:?}) → http://localhost:{}", gw.name, gw.api_type, binding.port);
+                for route in &gw.routes {
+                    println!("      {:?} {} → {}", route.method, route.path, route.function_resource);
+                }
+            }
+        } else {
+            println!("\n🌐 Routes:");
+            for gw in &config.gateways {
+                for route in &gw.routes {
+                    println!("   {:?} {} → {}", route.method, route.path, route.function_resource);
+                }
             }
         }
     } else {
@@ -188,7 +217,11 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port
         println!("\n👀 Hot reload enabled — watching for file changes");
     }
 
-    println!("\n🔥 Starting server at http://localhost:{}\n", port);
+    if multi_gateway {
+        println!("\n🔥 Starting {} servers...\n", gateway_bindings.len());
+    } else {
+        println!("\n🔥 Starting server at http://localhost:{}\n", port);
+    }
 
     // CORS config
     let cors_config = project_config.as_ref().and_then(|pc| pc.cors.clone());
@@ -237,8 +270,10 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port
         }
     }
 
-    // Start HTTP server (blocks until shutdown)
-    if watch {
+    // Start HTTP server(s) (blocks until shutdown)
+    if multi_gateway {
+        server::start_multi_gateway(config, dir, gateway_bindings, watch, cors_config.as_ref(), debug_options).await?;
+    } else if watch {
         server::start_server_with_watch(config, dir, port, cors_config.as_ref(), debug_options).await?;
     } else {
         server::start_server(config, dir, port, cors_config.as_ref(), debug_options).await?;

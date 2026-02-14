@@ -52,6 +52,14 @@ pub struct RouteMatch<'a> {
 }
 
 impl Router {
+    /// Create a router for a single gateway
+    pub fn for_gateway(
+        gateway: &ApiGatewayConfig,
+        functions: &[LambdaConfig],
+    ) -> Self {
+        Self::new(&[gateway.clone()], functions)
+    }
+
     /// Create a new router from configuration
     pub fn new(
         gateways: &[ApiGatewayConfig],

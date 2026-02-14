@@ -34,6 +34,9 @@ serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Async utilities
+futures = "0.3"
+
 # Utilities
 anyhow = "1"
 thiserror = "1"
