@@ -274,6 +274,9 @@ environment:
             layers: vec![],
             state_machines: vec![],
             dynamodb_tables: vec![],
+            sqs_queues: vec![],
+            sns_topics: vec![],
+            event_source_mappings: vec![],
         };
         proj.apply(&mut config);
         assert_eq!(config.functions[0].environment.get("STAGE").unwrap(), "local");

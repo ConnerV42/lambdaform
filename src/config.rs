@@ -26,6 +26,18 @@ pub struct LambdaformConfig {
     /// DynamoDB table configurations (for integration hints)
     #[serde(default)]
     pub dynamodb_tables: Vec<DynamoDbTableConfig>,
+    
+    /// SQS queue configurations
+    #[serde(default)]
+    pub sqs_queues: Vec<SqsQueueConfig>,
+    
+    /// SNS topic configurations
+    #[serde(default)]
+    pub sns_topics: Vec<SnsTopicConfig>,
+    
+    /// Event source mappings (SQS/SNS/DynamoDB → Lambda)
+    #[serde(default)]
+    pub event_source_mappings: Vec<EventSourceMappingConfig>,
 }
 
 /// DynamoDB table configuration (parsed for integration hints)
@@ -61,6 +73,75 @@ pub struct DynamoDbTableConfig {
 }
 
 fn default_billing_mode() -> String { "PROVISIONED".to_string() }
+
+/// SQS queue configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqsQueueConfig {
+    /// Resource name in Terraform (aws_sqs_queue.NAME)
+    pub resource_name: String,
+    
+    /// Queue name
+    pub name: String,
+    
+    /// Whether it's a FIFO queue
+    #[serde(default)]
+    pub fifo_queue: bool,
+    
+    /// Visibility timeout seconds
+    #[serde(default = "default_visibility_timeout")]
+    pub visibility_timeout: u32,
+}
+
+fn default_visibility_timeout() -> u32 { 30 }
+
+/// SNS topic configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnsTopicConfig {
+    /// Resource name in Terraform (aws_sns_topic.NAME)
+    pub resource_name: String,
+    
+    /// Topic name
+    pub name: String,
+    
+    /// Whether it's a FIFO topic
+    #[serde(default)]
+    pub fifo_topic: bool,
+}
+
+/// Event source mapping (connects SQS/SNS/DynamoDB streams to Lambda)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventSourceMappingConfig {
+    /// Resource name in Terraform
+    pub resource_name: String,
+    
+    /// Source type
+    pub source_type: EventSourceType,
+    
+    /// Source resource name (e.g., the SQS queue or DynamoDB table resource name)
+    pub source_resource: String,
+    
+    /// Target Lambda function resource name
+    pub function_resource: String,
+    
+    /// Batch size
+    #[serde(default = "default_batch_size")]
+    pub batch_size: u32,
+    
+    /// Whether enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_batch_size() -> u32 { 10 }
+fn default_true() -> bool { true }
+
+/// Event source types
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EventSourceType {
+    Sqs,
+    DynamoDb,
+    Kinesis,
+}
 
 /// Step Functions state machine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +375,9 @@ impl Default for LambdaformConfig {
             layers: Vec::new(),
             state_machines: Vec::new(),
             dynamodb_tables: Vec::new(),
+            sqs_queues: Vec::new(),
+            sns_topics: Vec::new(),
+            event_source_mappings: Vec::new(),
         }
     }
 }

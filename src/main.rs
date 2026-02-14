@@ -15,6 +15,7 @@ mod runtime;
 mod server;
 mod watcher;
 mod stepfunctions;
+mod trigger;
 mod websocket;
 
 /// Terraform-native local Lambda emulator
@@ -95,6 +96,33 @@ enum Commands {
         dir: PathBuf,
     },
 
+    /// Send a test message through SQS/SNS trigger to invoke a Lambda
+    Trigger {
+        /// Trigger type: sqs or sns
+        #[arg(short = 't', long, value_name = "TYPE")]
+        source_type: String,
+
+        /// Source resource name or queue/topic name
+        #[arg(short, long)]
+        source: String,
+
+        /// Message body (string or JSON)
+        #[arg(short, long)]
+        message: String,
+
+        /// Number of messages in batch (repeats the same message)
+        #[arg(short, long, default_value = "1")]
+        batch: u32,
+
+        /// Directory containing Terraform files
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+
+        /// Override target function (skip event source mapping lookup)
+        #[arg(short, long)]
+        function: Option<String>,
+    },
+
     /// Visualize Step Functions state machines (read-only)
     #[command(name = "stepfunctions", alias = "sfn")]
     StepFunctions {
@@ -142,6 +170,10 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Validate { dir } => {
             cmd_validate(dir)
+        }
+        Commands::Trigger { source_type, source, message, batch, dir, function } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(cmd_trigger(source_type, source, message, batch, dir, function))
         }
         Commands::StepFunctions { dir, name, json } => {
             cmd_stepfunctions(dir, name, json)
@@ -552,6 +584,33 @@ fn cmd_config(json_output: bool, dir: PathBuf) -> anyhow::Result<()> {
             println!("          AWS_ACCESS_KEY_ID: local");
             println!("          AWS_SECRET_ACCESS_KEY: local");
         }
+        
+        if !config.sqs_queues.is_empty() {
+            println!("\n📬 SQS Queues ({}):", config.sqs_queues.len());
+            for q in &config.sqs_queues {
+                let fifo = if q.fifo_queue { " (FIFO)" } else { "" };
+                println!("   • {}{}", q.name, fifo);
+            }
+        }
+        
+        if !config.sns_topics.is_empty() {
+            println!("\n📢 SNS Topics ({}):", config.sns_topics.len());
+            for t in &config.sns_topics {
+                let fifo = if t.fifo_topic { " (FIFO)" } else { "" };
+                println!("   • {}{}", t.name, fifo);
+            }
+        }
+        
+        if !config.event_source_mappings.is_empty() {
+            println!("\n🔗 Event Source Mappings ({}):", config.event_source_mappings.len());
+            for esm in &config.event_source_mappings {
+                let status = if esm.enabled { "enabled" } else { "disabled" };
+                println!("   • {:?} {} → {} (batch: {}, {})",
+                    esm.source_type, esm.source_resource, esm.function_resource,
+                    esm.batch_size, status);
+            }
+            println!("\n   💡 Trigger: lambdaform trigger -t sqs -s <queue> -m '{{\"key\":\"value\"}}'");
+        }
     }
     
     Ok(())
@@ -691,6 +750,72 @@ fn cmd_validate(dir: PathBuf) -> anyhow::Result<()> {
 
     println!("\n✅ Validation passed!");
     Ok(())
+}
+
+async fn cmd_trigger(
+    source_type: String,
+    source: String,
+    message: String,
+    batch: u32,
+    dir: PathBuf,
+    function: Option<String>,
+) -> anyhow::Result<()> {
+    println!("📨 Lambdaform Trigger Simulation\n");
+    
+    let mut config = parser::parse_terraform_dir(&dir)?;
+    
+    // Apply project config
+    let project_config = project_config::ProjectConfig::load(&dir)?;
+    if let Some(ref pc) = project_config {
+        pc.apply(&mut config);
+    }
+    
+    // Build message batch
+    let messages: Vec<String> = (0..batch).map(|_| message.clone()).collect();
+    
+    // If --function is provided, bypass event source mapping lookup and invoke directly
+    if let Some(ref fn_name) = function {
+        let lambda = config.functions.iter()
+            .find(|f| f.resource_name == *fn_name || f.function_name == *fn_name)
+            .ok_or_else(|| {
+                let available: Vec<_> = config.functions.iter()
+                    .map(|f| format!("  • {}", f.resource_name))
+                    .collect();
+                anyhow::anyhow!("Function '{}' not found.\n\nAvailable:\n{}", fn_name, available.join("\n"))
+            })?;
+        
+        let event_payload = match source_type.as_str() {
+            "sqs" => {
+                let queue = config.sqs_queues.iter()
+                    .find(|q| q.resource_name == source || q.name == source);
+                let (name, fifo) = queue.map(|q| (q.name.clone(), q.fifo_queue))
+                    .unwrap_or((source.clone(), false));
+                trigger::build_sqs_event(&name, &messages, fifo)
+            }
+            "sns" => {
+                let topic = config.sns_topics.iter()
+                    .find(|t| t.resource_name == source || t.name == source);
+                let name = topic.map(|t| t.name.clone()).unwrap_or(source.clone());
+                trigger::build_sns_event(&name, &messages)
+            }
+            _ => anyhow::bail!("Unsupported trigger type '{}'. Use 'sqs' or 'sns'.", source_type),
+        };
+        
+        println!("⚡ Triggering {} → {} with {} message(s)", source, lambda.function_name, batch);
+        
+        let executor = runtime::FunctionExecutor::new(lambda.clone(), dir);
+        match executor.invoke_raw_event(event_payload).await {
+            Ok(result) => {
+                println!("✅ Success");
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Err(e) => println!("❌ Failed: {}", e),
+        }
+        return Ok(());
+    }
+    
+    // Standard path: use event source mapping
+    trigger::execute_trigger(&config, &source_type, &source, messages, &dir).await
 }
 
 fn cmd_stepfunctions(dir: PathBuf, name: Option<String>, json_output: bool) -> anyhow::Result<()> {

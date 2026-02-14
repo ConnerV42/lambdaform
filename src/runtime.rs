@@ -618,6 +618,61 @@ except Exception as e:
     }
     
     /// Invoke the Lambda function with an event
+    /// Invoke with a raw JSON event (for SQS/SNS/DynamoDB triggers — not API Gateway format)
+    pub async fn invoke_raw_event(&self, raw_event: serde_json::Value) -> Result<serde_json::Value> {
+        let context = LambdaContext {
+            function_name: self.config.function_name.clone(),
+            function_version: "$LATEST".to_string(),
+            memory_limit_in_mb: self.config.memory_size,
+            aws_request_id: format!("local-{}", uuid_simple()),
+            invoked_function_arn: format!(
+                "arn:aws:lambda:local:000000000000:function:{}",
+                self.config.function_name
+            ),
+        };
+        
+        let payload = serde_json::json!({
+            "event": raw_event,
+            "context": context,
+        });
+        
+        // Use pool for Node.js/Python when available and not debugging
+        if self.use_pool() {
+            match &self.config.runtime {
+                Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
+                    let pool = self.pool.as_ref().unwrap();
+                    let env = self.env_with_layers();
+                    let result = pool.invoke(
+                        &self.config.function_name,
+                        &self.config.runtime,
+                        &self.config.handler,
+                        &self.source_dir,
+                        &env,
+                        &payload["event"],
+                        &payload["context"],
+                    ).await?;
+                    return Ok(result);
+                }
+                _ => {}
+            }
+        }
+        
+        match &self.config.runtime {
+            Runtime::Nodejs18 | Runtime::Nodejs20 => {
+                self.invoke_nodejs_raw(&payload).await
+            }
+            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
+                self.invoke_python_raw(&payload).await
+            }
+            Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
+                self.invoke_go_with_rie(&payload["event"]).await
+            }
+            _ => {
+                anyhow::bail!("Unsupported runtime: {:?}", self.config.runtime)
+            }
+        }
+    }
+    
     pub async fn invoke(&self, event: LambdaEvent) -> Result<LambdaResponse> {
         let context = LambdaContext {
             function_name: self.config.function_name.clone(),

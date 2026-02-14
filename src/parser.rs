@@ -189,6 +189,21 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
                             config.dynamodb_tables.push(table);
                         }
                     }
+                    "aws_sqs_queue" => {
+                        if let Some(queue) = parse_sqs_queue(resource_name, block)? {
+                            config.sqs_queues.push(queue);
+                        }
+                    }
+                    "aws_sns_topic" => {
+                        if let Some(topic) = parse_sns_topic(resource_name, block)? {
+                            config.sns_topics.push(topic);
+                        }
+                    }
+                    "aws_lambda_event_source_mapping" => {
+                        if let Some(esm) = parse_event_source_mapping(resource_name, block)? {
+                            config.event_source_mappings.push(esm);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -670,6 +685,78 @@ fn parse_dynamodb_table(name: &str, block: &hcl::Block) -> Result<Option<crate::
         gsi_names,
         lsi_names,
         stream_enabled,
+    }))
+}
+
+/// Parse aws_sqs_queue resource
+fn parse_sqs_queue(name: &str, block: &hcl::Block) -> Result<Option<crate::config::SqsQueueConfig>> {
+    let body = &block.body;
+    
+    let queue_name = get_string_attr(body, "name")
+        .unwrap_or_else(|| name.to_string());
+    
+    let fifo_queue = get_bool_attr(body, "fifo_queue").unwrap_or(false);
+    let visibility_timeout = get_number_attr(body, "visibility_timeout_seconds").unwrap_or(30);
+    
+    Ok(Some(crate::config::SqsQueueConfig {
+        resource_name: name.to_string(),
+        name: queue_name,
+        fifo_queue,
+        visibility_timeout,
+    }))
+}
+
+/// Parse aws_sns_topic resource
+fn parse_sns_topic(name: &str, block: &hcl::Block) -> Result<Option<crate::config::SnsTopicConfig>> {
+    let body = &block.body;
+    
+    let topic_name = get_string_attr(body, "name")
+        .unwrap_or_else(|| name.to_string());
+    
+    let fifo_topic = get_bool_attr(body, "fifo_topic").unwrap_or(false);
+    
+    Ok(Some(crate::config::SnsTopicConfig {
+        resource_name: name.to_string(),
+        name: topic_name,
+        fifo_topic,
+    }))
+}
+
+/// Parse aws_lambda_event_source_mapping resource
+fn parse_event_source_mapping(name: &str, block: &hcl::Block) -> Result<Option<crate::config::EventSourceMappingConfig>> {
+    let body = &block.body;
+    
+    // event_source_arn is a traversal like aws_sqs_queue.my_queue.arn
+    let source_ref = get_traversal_attr(body, "event_source_arn")
+        .unwrap_or_default();
+    
+    // function_name is a traversal like aws_lambda_function.processor.arn
+    let function_ref = get_traversal_attr(body, "function_name")
+        .unwrap_or_default();
+    
+    // Determine source type from the reference
+    let (source_type, source_resource) = if source_ref.starts_with("aws_sqs_queue.") {
+        (crate::config::EventSourceType::Sqs, extract_resource_name_from_ref(&source_ref))
+    } else if source_ref.starts_with("aws_dynamodb_table.") {
+        (crate::config::EventSourceType::DynamoDb, extract_resource_name_from_ref(&source_ref))
+    } else if source_ref.starts_with("aws_kinesis_stream.") {
+        (crate::config::EventSourceType::Kinesis, extract_resource_name_from_ref(&source_ref))
+    } else {
+        tracing::warn!("Event source mapping '{}': unrecognized source '{}'", name, source_ref);
+        return Ok(None);
+    };
+    
+    let function_resource = extract_lambda_name_from_ref(&function_ref);
+    let batch_size = get_number_attr(body, "batch_size").unwrap_or(10);
+    let enabled = get_bool_attr(body, "enabled").unwrap_or(true);
+    
+    Ok(Some(crate::config::EventSourceMappingConfig {
+        resource_name: name.to_string(),
+        source_type,
+        source_resource,
+        function_resource,
+        batch_size,
+        enabled,
     }))
 }
 

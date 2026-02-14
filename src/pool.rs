@@ -248,6 +248,57 @@ rl.on('line', async (line) => {{
     Ok(Worker { child, stdin, stdout })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_pool_new() {
+        let pool = ProcessPool::new();
+        let workers = pool.workers.lock().await;
+        assert!(workers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_all_empty() {
+        let pool = ProcessPool::new();
+        pool.invalidate_all().await;
+        let workers = pool.workers.lock().await;
+        assert!(workers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_key_uniqueness() {
+        // Verify different function/handler combos produce different keys
+        let key1: WorkerKey = ("func_a".to_string(), "index.handler".to_string());
+        let key2: WorkerKey = ("func_b".to_string(), "index.handler".to_string());
+        let key3: WorkerKey = ("func_a".to_string(), "other.handler".to_string());
+        assert_ne!(key1, key2);
+        assert_ne!(key1, key3);
+        assert_ne!(key2, key3);
+    }
+
+    #[test]
+    fn test_worker_response_deserialize() {
+        let json = r#"{"id":"req-1","success":true,"result":{"statusCode":200}}"#;
+        let resp: WorkerResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, "req-1");
+        assert!(resp.success);
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_worker_response_error_deserialize() {
+        let json = r#"{"id":"req-2","success":false,"error":"timeout"}"#;
+        let resp: WorkerResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, "req-2");
+        assert!(!resp.success);
+        assert!(resp.result.is_none());
+        assert_eq!(resp.error.as_deref(), Some("timeout"));
+    }
+}
+
 async fn spawn_python_worker(
     handler: &str,
     source_dir: &Path,

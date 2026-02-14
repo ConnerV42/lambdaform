@@ -26,6 +26,11 @@ If you use Terraform for Lambda infrastructure, your local development options a
 - 🏎️ **Warm process pool** — ~3ms warm invocations (97% faster than cold start)
 - 🔀 **Multiple gateways** — each API gets its own port
 - 🌍 **CORS** — built-in, configurable via `lambdaform.yaml`
+- 📦 **Lambda layers** — automatic layer path resolution for Node.js and Python
+- 🔌 **WebSocket APIs** — `$connect`/`$disconnect`/`$default`/custom routes with @connections management
+- 📨 **SQS/SNS triggers** — simulate event source mappings with proper event payloads
+- 🗄️ **DynamoDB hints** — table parsing with DynamoDB Local setup guidance
+- 📊 **Step Functions viz** — ASCII flow diagrams from `aws_sfn_state_machine` definitions
 - 🆓 **Open source** — MIT license, no feature gating
 
 ## Quick Start
@@ -92,6 +97,16 @@ lambdaform config --json
 
 # Validate Terraform files
 lambdaform validate
+
+# Step Functions visualization
+lambdaform stepfunctions                   # ASCII flow diagrams
+lambdaform sfn                             # alias
+
+# Trigger SQS/SNS events
+lambdaform trigger sqs my_queue '{"key":"value"}'
+lambdaform trigger sns my_topic '{"key":"value"}'
+lambdaform trigger sqs my_queue '{"key":"value"}' --batch 5
+lambdaform trigger sqs my_queue '{"key":"value"}' --function my_handler
 ```
 
 ## Example
@@ -266,11 +281,11 @@ Debug mode disables the warm process pool so breakpoints work correctly.
 - [x] Debugger integration (Node.js + Python)
 - [x] Multiple API Gateway support
 - [x] Config file (`lambdaform.yaml`)
-- [ ] Lambda layers
-- [ ] WebSocket support
-- [ ] SQS/SNS trigger simulation
-- [ ] DynamoDB Local integration hints
-- [ ] Step Functions visualization
+- [x] Lambda layers
+- [x] WebSocket API Gateway support
+- [x] SQS/SNS trigger simulation
+- [x] DynamoDB Local integration hints
+- [x] Step Functions visualization (read-only)
 
 ## Contributing
 
