@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level configuration parsed from Terraform
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LambdaformConfig {
     /// Lambda function configurations
     pub functions: Vec<LambdaConfig>,
@@ -259,6 +259,7 @@ pub enum Runtime {
 }
 
 impl Runtime {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "nodejs18.x" => Runtime::Nodejs18,
@@ -385,21 +386,6 @@ pub enum AuthorizerType {
     Cognito,
     /// IAM
     Iam,
-}
-
-impl Default for LambdaformConfig {
-    fn default() -> Self {
-        Self {
-            functions: Vec::new(),
-            gateways: Vec::new(),
-            layers: Vec::new(),
-            state_machines: Vec::new(),
-            dynamodb_tables: Vec::new(),
-            sqs_queues: Vec::new(),
-            sns_topics: Vec::new(),
-            event_source_mappings: Vec::new(),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -54,7 +54,7 @@ pub struct RouteMatch<'a> {
 impl Router {
     /// Create a router for a single gateway
     pub fn for_gateway(gateway: &ApiGatewayConfig, functions: &[LambdaConfig]) -> Self {
-        Self::new(&[gateway.clone()], functions)
+        Self::new(std::slice::from_ref(gateway), functions)
     }
 
     /// Create a new router from configuration
@@ -143,8 +143,8 @@ fn compile_route(route: &RouteConfig) -> Option<CompiledRoute> {
             let name = &part[1..part.len() - 1];
 
             // Handle {proxy+} style catch-all
-            if name.ends_with('+') {
-                param_names.push(name[..name.len() - 1].to_string());
+            if let Some(stripped) = name.strip_suffix('+') {
+                param_names.push(stripped.to_string());
                 regex_str.push_str("(.+)");
             } else {
                 param_names.push(name.to_string());

@@ -298,7 +298,7 @@ fn render_state(name: &str, state: &State, output: &mut String, pad: &str) {
     if let Some(ref resource) = state.resource {
         // Shorten ARN-like refs
         let short = if resource.contains("lambda") {
-            resource.split(':').last().unwrap_or(resource)
+            resource.split(':').next_back().unwrap_or(resource)
         } else {
             resource
         };

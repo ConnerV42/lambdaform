@@ -526,7 +526,7 @@ except Exception as e:
             let mut needs = false;
             if let Ok(entries) = std::fs::read_dir(&source_dir) {
                 for entry in entries.flatten() {
-                    if entry.path().extension().map_or(false, |e| e == "go") {
+                    if entry.path().extension().is_some_and(|e| e == "go") {
                         if let Ok(meta) = entry.metadata() {
                             if let Ok(src_modified) = meta.modified() {
                                 if src_modified > bin_modified {
@@ -594,7 +594,7 @@ except Exception as e:
 
         let state = RieState {
             event: event_bytes,
-            request_id: request_id,
+            request_id,
             response: response.clone(),
             response_ready: response_ready.clone(),
         };
@@ -840,7 +840,7 @@ process.stdin.once('data', async (data) => {{
         );
 
         // Check if debug mode is enabled for Node.js
-        let debug_enabled = self.debug.as_ref().map_or(false, |d| d.nodejs);
+        let debug_enabled = self.debug.as_ref().is_some_and(|d| d.nodejs);
 
         let mut cmd = Command::new("node");
 
@@ -864,8 +864,8 @@ process.stdin.once('data', async (data) => {{
 
         // When debugging, write bootstrap to a temp file for better source visibility
         // in debugger. Otherwise, use inline -e for speed.
-        let _temp_file; // hold reference to keep temp file alive
-        if debug_enabled {
+        // hold reference to keep temp file alive
+        let _temp_file = if debug_enabled {
             let tmp = std::env::temp_dir().join(format!(
                 "lambdaform-bootstrap-{}.js",
                 std::time::SystemTime::now()
@@ -875,11 +875,11 @@ process.stdin.once('data', async (data) => {{
             ));
             std::fs::write(&tmp, &bootstrap).context("Failed to write debug bootstrap file")?;
             cmd.arg(&tmp);
-            _temp_file = Some(tmp);
+            Some(tmp)
         } else {
             cmd.arg("-e").arg(&bootstrap);
-            _temp_file = None;
-        }
+            None
+        };
 
         let mut child = cmd
             .current_dir(&self.source_dir)
@@ -935,7 +935,7 @@ process.stdin.once('data', async (data) => {{
         let handler_path = find_handler_file(&self.source_dir, file, "py")?;
 
         // Check if debug mode is enabled for Python
-        let debug_enabled = self.debug.as_ref().map_or(false, |d| d.python);
+        let debug_enabled = self.debug.as_ref().is_some_and(|d| d.python);
 
         let debug_preamble = if debug_enabled {
             let debug_opts = self
@@ -988,10 +988,9 @@ except Exception as e:
         );
 
         // When debugging, write bootstrap to a temp file for better source visibility
-        let _temp_file;
         let mut cmd = Command::new("python3");
 
-        if debug_enabled {
+        let _temp_file = if debug_enabled {
             let tmp = std::env::temp_dir().join(format!(
                 "lambdaform-bootstrap-{}.py",
                 std::time::SystemTime::now()
@@ -1001,11 +1000,11 @@ except Exception as e:
             ));
             std::fs::write(&tmp, &bootstrap).context("Failed to write debug bootstrap file")?;
             cmd.arg(&tmp);
-            _temp_file = Some(tmp);
+            Some(tmp)
         } else {
             cmd.arg("-c").arg(&bootstrap);
-            _temp_file = None;
-        }
+            None
+        };
 
         let mut child = cmd
             .current_dir(&self.source_dir)

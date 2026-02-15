@@ -815,7 +815,7 @@ pub fn resolve_layer_paths(
                 };
 
                 // If it's a zip file, check for extracted directory alongside it
-                let resolved = if path.extension().map_or(false, |e| e == "zip") {
+                let resolved = if path.extension().is_some_and(|e| e == "zip") {
                     // Look for a directory with the same name minus .zip
                     let dir = path.with_extension("");
                     if dir.is_dir() {

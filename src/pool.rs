@@ -85,6 +85,12 @@ pub struct ProcessPool {
     workers: Mutex<HashMap<WorkerKey, Worker>>,
 }
 
+impl Default for ProcessPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProcessPool {
     pub fn new() -> Self {
         Self {
@@ -93,6 +99,7 @@ impl ProcessPool {
     }
 
     /// Invoke a function using a pooled worker. Spawns one if needed.
+    #[allow(clippy::too_many_arguments)]
     pub async fn invoke(
         &self,
         function_name: &str,

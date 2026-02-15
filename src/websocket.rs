@@ -100,8 +100,7 @@ impl WsState {
         // Common format: "$request.body.action" → extract "action" field from JSON body
         let expr = &self.route_selection_expression;
 
-        if expr.starts_with("$request.body.") {
-            let field = &expr["$request.body.".len()..];
+        if let Some(field) = expr.strip_prefix("$request.body.") {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
                 return parsed
                     .get(field)

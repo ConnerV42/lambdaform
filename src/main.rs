@@ -8,14 +8,11 @@ use walkdir::WalkDir;
 
 use lambdaform::config;
 use lambdaform::parser;
-use lambdaform::pool;
 use lambdaform::project_config;
-use lambdaform::router;
 use lambdaform::runtime;
 use lambdaform::server;
 use lambdaform::stepfunctions;
 use lambdaform::trigger;
-use lambdaform::watcher;
 use lambdaform::websocket;
 
 /// Terraform-native local Lambda emulator
@@ -225,6 +222,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_start(
     port: u16,
     dir: PathBuf,
@@ -393,7 +391,7 @@ async fn cmd_start(
         || debug_python
         || debug_from_config
             .as_ref()
-            .map_or(false, |dc| dc.nodejs || dc.python);
+            .is_some_and(|dc| dc.nodejs || dc.python);
 
     let debug_options = if has_any_debug {
         let dc = debug_from_config.unwrap_or_default();
@@ -788,7 +786,7 @@ fn cmd_validate(dir: PathBuf, var_files: Vec<PathBuf>) -> anyhow::Result<()> {
         .max_depth(2)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "tf"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "tf"))
         .collect();
 
     if tf_files.is_empty() {

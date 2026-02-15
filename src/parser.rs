@@ -42,7 +42,7 @@ impl VariableResolver {
             .filter_map(|e| e.ok())
         {
             let path = entry.path().to_path_buf();
-            if path.extension().map_or(false, |ext| ext == "tf") {
+            if path.extension().is_some_and(|ext| ext == "tf") {
                 tf_files.push(path);
             }
         }
@@ -190,7 +190,7 @@ pub fn parse_terraform_dir_with_var_files(
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "tf") {
+        if path.extension().is_some_and(|ext| ext == "tf") {
             tracing::debug!("Parsing: {}", path.display());
             parse_tf_file(path, &mut config, &resolver)?;
         }
@@ -290,21 +290,20 @@ fn parse_tf_file(
     for block in body.blocks() {
         let identifier = block.identifier.to_string();
         if identifier == "resource" {
-            let labels: Vec<String> = block.labels.iter().map(|l| label_to_string(l)).collect();
+            let labels: Vec<String> = block.labels.iter().map(label_to_string).collect();
             if labels.len() >= 2 {
                 let resource_type = &labels[0];
                 let resource_name = &labels[1];
 
                 match resource_type.as_str() {
                     "aws_lambda_function" => {
-                        if let Some(lambda) =
-                            parse_lambda_function(&resource_name, block, resolver)?
+                        if let Some(lambda) = parse_lambda_function(resource_name, block, resolver)?
                         {
                             config.functions.push(lambda);
                         }
                     }
                     "aws_api_gateway_rest_api" => {
-                        if let Some(api) = parse_api_gateway_rest(&resource_name, block)? {
+                        if let Some(api) = parse_api_gateway_rest(resource_name, block)? {
                             config.gateways.push(api);
                         }
                     }
@@ -471,7 +470,7 @@ fn resolve_api_gateway_routes(
     // Build authorizer name → AuthorizerConfig lookup
     let authorizer_map: HashMap<String, AuthorizerConfig> = authorizers
         .iter()
-        .filter_map(|a| {
+        .map(|a| {
             let auth_type = match a.auth_type.as_str() {
                 "TOKEN" | "REQUEST" => AuthorizerType::Lambda,
                 "COGNITO_USER_POOLS" => AuthorizerType::Cognito,
@@ -481,13 +480,13 @@ fn resolve_api_gateway_routes(
                 .lambda_uri_ref
                 .as_ref()
                 .map(|uri| extract_lambda_name_from_ref(uri));
-            Some((
+            (
                 a.resource_name.clone(),
                 AuthorizerConfig {
                     auth_type,
                     function_resource,
                 },
-            ))
+            )
         })
         .collect();
 
