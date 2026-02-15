@@ -73,8 +73,12 @@ pub struct DebugConfig {
     pub break_on_start: bool,
 }
 
-fn default_debug_port() -> u16 { 9229 }
-fn default_python_debug_port() -> u16 { 5678 }
+fn default_debug_port() -> u16 {
+    9229
+}
+fn default_python_debug_port() -> u16 {
+    5678
+}
 
 impl Default for DebugConfig {
     fn default() -> Self {
@@ -87,7 +91,9 @@ impl Default for DebugConfig {
         }
     }
 }
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// CORS configuration
 #[derive(Debug, Clone, Deserialize)]
@@ -184,11 +190,15 @@ impl ProjectConfig {
         for func in &mut config.functions {
             // Apply global env vars first (Terraform values take precedence, then global, then per-function)
             for (k, v) in &self.environment {
-                func.environment.entry(k.clone()).or_insert_with(|| v.clone());
+                func.environment
+                    .entry(k.clone())
+                    .or_insert_with(|| v.clone());
             }
 
             // Find per-function override by resource_name or function_name
-            let override_cfg = self.functions.get(&func.resource_name)
+            let override_cfg = self
+                .functions
+                .get(&func.resource_name)
                 .or_else(|| self.functions.get(&func.function_name));
 
             if let Some(ovr) = override_cfg {
@@ -279,6 +289,9 @@ environment:
             event_source_mappings: vec![],
         };
         proj.apply(&mut config);
-        assert_eq!(config.functions[0].environment.get("STAGE").unwrap(), "local");
+        assert_eq!(
+            config.functions[0].environment.get("STAGE").unwrap(),
+            "local"
+        );
     }
 }

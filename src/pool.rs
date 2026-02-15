@@ -19,7 +19,12 @@ struct Worker {
 
 impl Worker {
     /// Send an invocation and read the response.
-    async fn invoke(&mut self, id: &str, event: &serde_json::Value, context: &serde_json::Value) -> Result<WorkerResponse> {
+    async fn invoke(
+        &mut self,
+        id: &str,
+        event: &serde_json::Value,
+        context: &serde_json::Value,
+    ) -> Result<WorkerResponse> {
         let request = serde_json::json!({
             "id": id,
             "event": event,
@@ -27,13 +32,18 @@ impl Worker {
         });
         let mut line = serde_json::to_string(&request)?;
         line.push('\n');
-        self.stdin.write_all(line.as_bytes()).await
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
             .context("Failed to write to worker stdin")?;
         self.stdin.flush().await?;
 
         // Read response line
         let mut response_line = String::new();
-        let n = self.stdout.read_line(&mut response_line).await
+        let n = self
+            .stdout
+            .read_line(&mut response_line)
+            .await
             .context("Failed to read from worker stdout")?;
         if n == 0 {
             anyhow::bail!("Worker process closed stdout (crashed?)");
@@ -43,7 +53,11 @@ impl Worker {
             .with_context(|| format!("Invalid worker response: {}", response_line.trim()))?;
 
         if resp.id != id {
-            anyhow::bail!("Worker response id mismatch: expected {}, got {}", id, resp.id);
+            anyhow::bail!(
+                "Worker response id mismatch: expected {}, got {}",
+                id,
+                resp.id
+            );
         }
 
         Ok(resp)
@@ -90,8 +104,13 @@ impl ProcessPool {
         context: &serde_json::Value,
     ) -> Result<serde_json::Value> {
         let key = (function_name.to_string(), handler.to_string());
-        let id = format!("req-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        let id = format!(
+            "req-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
 
         let mut workers = self.workers.lock().await;
 
@@ -122,7 +141,8 @@ impl ProcessPool {
         match resp {
             Ok(r) => {
                 if r.success {
-                    r.result.ok_or_else(|| anyhow::anyhow!("Worker returned success but no result"))
+                    r.result
+                        .ok_or_else(|| anyhow::anyhow!("Worker returned success but no result"))
                 } else {
                     anyhow::bail!("Lambda error: {}", r.error.unwrap_or_default())
                 }
@@ -166,15 +186,15 @@ async fn spawn_worker(
         crate::config::Runtime::Nodejs18 | crate::config::Runtime::Nodejs20 => {
             spawn_nodejs_worker(handler, source_dir, env).await
         }
-        crate::config::Runtime::Python310 | crate::config::Runtime::Python311 | crate::config::Runtime::Python312 => {
-            spawn_python_worker(handler, source_dir, env).await
-        }
+        crate::config::Runtime::Python310
+        | crate::config::Runtime::Python311
+        | crate::config::Runtime::Python312 => spawn_python_worker(handler, source_dir, env).await,
         _ => anyhow::bail!("Process pool not supported for runtime {:?}", runtime),
     }
 }
 
 // Re-use shared handler parsing from runtime module
-use crate::runtime::{parse_handler, find_handler_file};
+use crate::runtime::{find_handler_file, parse_handler};
 
 async fn spawn_nodejs_worker(
     handler: &str,
@@ -228,7 +248,8 @@ rl.on('line', async (line) => {{
     }}
 }});
 "#,
-        handler_path.display(), func
+        handler_path.display(),
+        func
     );
 
     let mut child = Command::new("node")
@@ -242,10 +263,22 @@ rl.on('line', async (line) => {{
         .spawn()
         .context("Failed to spawn Node.js worker")?;
 
-    let stdin = child.stdin.take().context("Failed to capture worker stdin")?;
-    let stdout = BufReader::new(child.stdout.take().context("Failed to capture worker stdout")?);
+    let stdin = child
+        .stdin
+        .take()
+        .context("Failed to capture worker stdin")?;
+    let stdout = BufReader::new(
+        child
+            .stdout
+            .take()
+            .context("Failed to capture worker stdout")?,
+    );
 
-    Ok(Worker { child, stdin, stdout })
+    Ok(Worker {
+        child,
+        stdin,
+        stdout,
+    })
 }
 
 #[cfg(test)]
@@ -339,7 +372,8 @@ for line in sys.stdin:
         _real_stdout.write(json.dumps({{"id": req["id"], "success": False, "error": str(e)}}) + "\n")
         _real_stdout.flush()
 "#,
-        handler_path.display(), func
+        handler_path.display(),
+        func
     );
 
     let mut child = Command::new("python3")
@@ -354,8 +388,20 @@ for line in sys.stdin:
         .spawn()
         .context("Failed to spawn Python worker")?;
 
-    let stdin = child.stdin.take().context("Failed to capture worker stdin")?;
-    let stdout = BufReader::new(child.stdout.take().context("Failed to capture worker stdout")?);
+    let stdin = child
+        .stdin
+        .take()
+        .context("Failed to capture worker stdin")?;
+    let stdout = BufReader::new(
+        child
+            .stdout
+            .take()
+            .context("Failed to capture worker stdout")?,
+    );
 
-    Ok(Worker { child, stdin, stdout })
+    Ok(Worker {
+        child,
+        stdin,
+        stdout,
+    })
 }

@@ -41,7 +41,10 @@ async fn test_rest_get_hello() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
-    assert!(body["message"].as_str().unwrap().contains("Hello from Lambdaform!"));
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("Hello from Lambdaform!"));
     assert_eq!(body["environment"], "local");
 }
 
@@ -49,7 +52,11 @@ async fn test_rest_get_hello() {
 async fn test_rest_get_hello_with_query() {
     let app = build_test_app("simple-node");
     let resp = app
-        .oneshot(Request::get("/hello?name=Conner").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/hello?name=Conner")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -125,7 +132,12 @@ async fn test_rest_response_content_type() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("application/json"));
 }
 
@@ -141,7 +153,10 @@ async fn test_http_api_get_hello() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
-    assert!(body["message"].as_str().unwrap().contains("Hello from HTTP API!"));
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("Hello from HTTP API!"));
 }
 
 #[tokio::test]
@@ -179,7 +194,11 @@ async fn test_http_api_unmatched_returns_404() {
     // Paths not matching any explicit route return 404
     // ($default route support may be added in a future version)
     let resp = app
-        .oneshot(Request::get("/something/random").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/something/random")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -197,7 +216,10 @@ async fn test_env_variables_in_response() {
         .unwrap();
 
     let body = body_json(resp).await;
-    assert!(body["message"].as_str().unwrap().contains("Hello from Lambdaform!"));
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("Hello from Lambdaform!"));
     assert_eq!(body["environment"], "local");
 }
 

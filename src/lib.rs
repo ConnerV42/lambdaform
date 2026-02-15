@@ -7,7 +7,7 @@ pub mod project_config;
 pub mod router;
 pub mod runtime;
 pub mod server;
-pub mod watcher;
 pub mod stepfunctions;
 pub mod trigger;
+pub mod watcher;
 pub mod websocket;

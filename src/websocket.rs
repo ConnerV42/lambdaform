@@ -3,17 +3,19 @@
 //! Provides a WebSocket server that routes messages to Lambda functions
 //! based on route selection expressions, mimicking AWS API Gateway WebSocket APIs.
 
+use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
-use futures::{SinkExt, StreamExt};
 
 use crate::config::{LambdaConfig, LambdaformConfig};
 use crate::pool::ProcessPool;
-use crate::runtime::{DebugOptions, FunctionExecutor, RequestIdentity, WebSocketEvent, WebSocketRequestContext};
+use crate::runtime::{
+    DebugOptions, FunctionExecutor, RequestIdentity, WebSocketEvent, WebSocketRequestContext,
+};
 
 /// Shared state for WebSocket connections
 pub struct WsState {
@@ -62,14 +64,21 @@ impl WsState {
 
     fn build_routes(config: &LambdaformConfig, gateway_resource: &str) -> HashMap<String, WsRoute> {
         let mut routes = HashMap::new();
-        if let Some(gw) = config.gateways.iter().find(|g| g.resource_name == gateway_resource) {
+        if let Some(gw) = config
+            .gateways
+            .iter()
+            .find(|g| g.resource_name == gateway_resource)
+        {
             for route in &gw.routes {
                 // For WebSocket, the path IS the route key ($connect, $disconnect, $default, or custom)
                 let route_key = route.path.clone();
-                routes.insert(route_key.clone(), WsRoute {
-                    route_key,
-                    function_resource: route.function_resource.clone(),
-                });
+                routes.insert(
+                    route_key.clone(),
+                    WsRoute {
+                        route_key,
+                        function_resource: route.function_resource.clone(),
+                    },
+                );
             }
         }
         routes
@@ -78,7 +87,11 @@ impl WsState {
     /// Find function config by resource name
     async fn find_function(&self, resource_name: &str) -> Option<LambdaConfig> {
         let config = self.config.read().await;
-        config.functions.iter().find(|f| f.resource_name == resource_name).cloned()
+        config
+            .functions
+            .iter()
+            .find(|f| f.resource_name == resource_name)
+            .cloned()
     }
 
     /// Resolve the route key from a message body using the route selection expression
@@ -86,14 +99,17 @@ impl WsState {
         // Parse the route selection expression
         // Common format: "$request.body.action" → extract "action" field from JSON body
         let expr = &self.route_selection_expression;
-        
+
         if expr.starts_with("$request.body.") {
             let field = &expr["$request.body.".len()..];
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-                return parsed.get(field).and_then(|v| v.as_str()).map(|s| s.to_string());
+                return parsed
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
             }
         }
-        
+
         None
     }
 
@@ -159,22 +175,25 @@ pub async fn start_websocket_server(
 }
 
 /// Handle a single WebSocket connection
-async fn handle_connection(
-    state: Arc<WsState>,
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-) {
-    let connection_id = format!("{:x}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos());
-    
+async fn handle_connection(state: Arc<WsState>, stream: TcpStream, peer_addr: SocketAddr) {
+    let connection_id = format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
     let connected_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
 
-    tracing::info!("🔌 New WebSocket connection from {} (id: {})", peer_addr, connection_id);
+    tracing::info!(
+        "🔌 New WebSocket connection from {} (id: {})",
+        peer_addr,
+        connection_id
+    );
 
     // Upgrade to WebSocket
     let ws_stream = match tokio_tungstenite::accept_async(stream).await {
@@ -205,11 +224,16 @@ async fn handle_connection(
         connected_at,
         None,
         Some(&peer_addr),
-    ).await;
+    )
+    .await;
 
     if let Some(response) = connect_result {
         if response.status_code >= 400 {
-            tracing::warn!("← ⚠️ $connect handler rejected connection {} (status {})", connection_id, response.status_code);
+            tracing::warn!(
+                "← ⚠️ $connect handler rejected connection {} (status {})",
+                connection_id,
+                response.status_code
+            );
             let mut connections = state.connections.lock().await;
             connections.remove(&connection_id);
             return;
@@ -234,7 +258,8 @@ async fn handle_connection(
                 tracing::info!("→ WS {} message: {} bytes", connection_id, text.len());
 
                 // Resolve route from message body
-                let route_key = state.resolve_route_key(&text)
+                let route_key = state
+                    .resolve_route_key(&text)
                     .unwrap_or_else(|| "$default".to_string());
 
                 let response = invoke_route_handler(
@@ -245,7 +270,8 @@ async fn handle_connection(
                     connected_at,
                     Some(&text),
                     None,
-                ).await;
+                )
+                .await;
 
                 // If handler returns a body, send it back
                 if let Some(resp) = response {
@@ -270,7 +296,8 @@ async fn handle_connection(
                     connected_at,
                     Some(&base64_encode(&data)),
                     None,
-                ).await;
+                )
+                .await;
 
                 if let Some(resp) = response {
                     if let Some(body) = resp.body {
@@ -310,7 +337,8 @@ async fn handle_connection(
         connected_at,
         None,
         None,
-    ).await;
+    )
+    .await;
 
     // Clean up connection
     {
@@ -333,16 +361,15 @@ async fn invoke_route_handler(
     peer_addr: Option<&SocketAddr>,
 ) -> Option<crate::runtime::LambdaResponse> {
     let routes = state.routes.read().await;
-    
+
     // Try exact match first, then fall back to $default
-    let route = routes.get(route_key)
-        .or_else(|| {
-            if route_key != "$connect" && route_key != "$disconnect" {
-                routes.get("$default")
-            } else {
-                None
-            }
-        });
+    let route = routes.get(route_key).or_else(|| {
+        if route_key != "$connect" && route_key != "$disconnect" {
+            routes.get("$default")
+        } else {
+            None
+        }
+    });
 
     let route = match route {
         Some(r) => r.clone(),
@@ -356,7 +383,11 @@ async fn invoke_route_handler(
     let function = match state.find_function(&route.function_resource).await {
         Some(f) => f,
         None => {
-            tracing::error!("Function '{}' not found for route '{}'", route.function_resource, route_key);
+            tracing::error!(
+                "Function '{}' not found for route '{}'",
+                route.function_resource,
+                route_key
+            );
             return None;
         }
     };
@@ -381,7 +412,9 @@ async fn invoke_route_handler(
                 None
             },
             identity: RequestIdentity {
-                source_ip: peer_addr.map(|a| a.ip().to_string()).unwrap_or_else(|| "127.0.0.1".to_string()),
+                source_ip: peer_addr
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
             },
             connected_at: Some(connected_at),
         },
@@ -406,7 +439,8 @@ async fn invoke_route_handler(
 
     // Resolve layer paths
     let config = state.config.read().await;
-    let layer_paths = crate::server::resolve_layer_paths(&function, &config.layers, &state.source_dir);
+    let layer_paths =
+        crate::server::resolve_layer_paths(&function, &config.layers, &state.source_dir);
     drop(config);
 
     let executor = FunctionExecutor::new(function.clone(), state.source_dir.clone())
@@ -421,21 +455,29 @@ async fn invoke_route_handler(
         Ok(raw_result) => {
             let duration = start.elapsed();
             // Parse response — WebSocket handlers return { statusCode, body } like HTTP handlers
-            let status_code = raw_result.get("statusCode")
+            let status_code = raw_result
+                .get("statusCode")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(200) as u16;
-            let body = raw_result.get("body")
+            let body = raw_result
+                .get("body")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let headers = raw_result.get("headers")
+            let headers = raw_result
+                .get("headers")
                 .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v.clone()).ok());
-            let is_base64_encoded = raw_result.get("isBase64Encoded")
+            let is_base64_encoded = raw_result
+                .get("isBase64Encoded")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            tracing::info!("← WS {} {} → {} [{:.1}ms]",
-                route_key, event_type, status_code,
-                duration.as_secs_f64() * 1000.0);
+            tracing::info!(
+                "← WS {} {} → {} [{:.1}ms]",
+                route_key,
+                event_type,
+                status_code,
+                duration.as_secs_f64() * 1000.0
+            );
 
             Some(crate::runtime::LambdaResponse {
                 status_code,
@@ -446,9 +488,13 @@ async fn invoke_route_handler(
         }
         Err(e) => {
             let duration = start.elapsed();
-            tracing::error!("← ❌ WS {} {} error [{:.1}ms]: {}",
-                route_key, event_type,
-                duration.as_secs_f64() * 1000.0, e);
+            tracing::error!(
+                "← ❌ WS {} {} error [{:.1}ms]: {}",
+                route_key,
+                event_type,
+                duration.as_secs_f64() * 1000.0,
+                e
+            );
             None
         }
     }
@@ -456,21 +502,30 @@ async fn invoke_route_handler(
 
 /// Start a small HTTP API for @connections management (POST to connection)
 async fn start_connections_api(state: Arc<WsState>, port: u16) {
-    use axum::{Router, routing::post, extract::{State, Path}, body::Bytes, http::StatusCode};
+    use axum::{
+        body::Bytes,
+        extract::{Path, State},
+        http::StatusCode,
+        routing::post,
+        Router,
+    };
 
     let app = Router::new()
-        .route("/@connections/:connection_id", post(
-            |State(state): State<Arc<WsState>>,
-             Path(connection_id): Path<String>,
-             body: Bytes| async move {
-                let data = String::from_utf8_lossy(&body).to_string();
-                if state.post_to_connection(&connection_id, &data).await {
-                    StatusCode::OK
-                } else {
-                    StatusCode::GONE
-                }
-            }
-        ))
+        .route(
+            "/@connections/:connection_id",
+            post(
+                |State(state): State<Arc<WsState>>,
+                 Path(connection_id): Path<String>,
+                 body: Bytes| async move {
+                    let data = String::from_utf8_lossy(&body).to_string();
+                    if state.post_to_connection(&connection_id, &data).await {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::GONE
+                    }
+                },
+            ),
+        )
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -521,10 +576,7 @@ mod tests {
             gateway_resource: "test".to_string(),
         };
 
-        assert_eq!(
-            state.resolve_route_key(r#"{"data": "hello"}"#),
-            None
-        );
+        assert_eq!(state.resolve_route_key(r#"{"data": "hello"}"#), None);
     }
 
     #[test]

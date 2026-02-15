@@ -46,7 +46,11 @@ pub struct AppStateInner {
 
 impl AppState {
     /// Create state for all gateways merged (backward compat / single gateway)
-    pub fn new(config: LambdaformConfig, source_dir: std::path::PathBuf, debug: Option<DebugOptions>) -> Self {
+    pub fn new(
+        config: LambdaformConfig,
+        source_dir: std::path::PathBuf,
+        debug: Option<DebugOptions>,
+    ) -> Self {
         let router = LambdaRouter::new(&config.gateways, &config.functions);
         Self {
             inner: RwLock::new(AppStateInner { router, config }),
@@ -58,7 +62,12 @@ impl AppState {
     }
 
     /// Create state for a single gateway
-    pub fn for_gateway(config: LambdaformConfig, gateway: &ApiGatewayConfig, source_dir: std::path::PathBuf, debug: Option<DebugOptions>) -> Self {
+    pub fn for_gateway(
+        config: LambdaformConfig,
+        gateway: &ApiGatewayConfig,
+        source_dir: std::path::PathBuf,
+        debug: Option<DebugOptions>,
+    ) -> Self {
         let router = LambdaRouter::for_gateway(gateway, &config.functions);
         Self {
             inner: RwLock::new(AppStateInner { router, config }),
@@ -75,7 +84,11 @@ impl AppState {
 
         let new_router = if let Some(ref gw_resource) = self.gateway_resource {
             // Rebuild router for just this gateway
-            if let Some(gw) = new_config.gateways.iter().find(|g| g.resource_name == *gw_resource) {
+            if let Some(gw) = new_config
+                .gateways
+                .iter()
+                .find(|g| g.resource_name == *gw_resource)
+            {
                 LambdaRouter::for_gateway(gw, &new_config.functions)
             } else {
                 tracing::warn!("⚠️ Gateway '{}' not found after reload", gw_resource);
@@ -88,9 +101,12 @@ impl AppState {
         let mut inner = self.inner.write().await;
         let fn_count = new_config.functions.len();
         let route_count = match &self.gateway_resource {
-            Some(res) => new_config.gateways.iter()
+            Some(res) => new_config
+                .gateways
+                .iter()
                 .find(|g| g.resource_name == *res)
-                .map(|g| g.routes.len()).unwrap_or(0),
+                .map(|g| g.routes.len())
+                .unwrap_or(0),
             None => new_config.gateways.iter().map(|g| g.routes.len()).sum(),
         };
         inner.config = new_config;
@@ -100,7 +116,10 @@ impl AppState {
             "🔄 Reloaded: {} functions, {} routes{}",
             fn_count,
             route_count,
-            self.gateway_resource.as_ref().map(|r| format!(" ({})", r)).unwrap_or_default()
+            self.gateway_resource
+                .as_ref()
+                .map(|r| format!(" ({})", r))
+                .unwrap_or_default()
         );
         Ok(())
     }
@@ -119,7 +138,9 @@ fn build_cors_layer(cors_config: Option<&CorsConfig>) -> CorsLayer {
     if config.allow_origins.iter().any(|o| o == "*") {
         layer = layer.allow_origin(Any);
     } else {
-        let origins: Vec<axum::http::HeaderValue> = config.allow_origins.iter()
+        let origins: Vec<axum::http::HeaderValue> = config
+            .allow_origins
+            .iter()
             .filter_map(|o| o.parse().ok())
             .collect();
         layer = layer.allow_origin(origins);
@@ -129,7 +150,9 @@ fn build_cors_layer(cors_config: Option<&CorsConfig>) -> CorsLayer {
     if config.allow_methods.is_empty() {
         layer = layer.allow_methods(Any);
     } else {
-        let methods: Vec<Method> = config.allow_methods.iter()
+        let methods: Vec<Method> = config
+            .allow_methods
+            .iter()
             .filter_map(|m| m.parse().ok())
             .collect();
         layer = layer.allow_methods(methods);
@@ -139,7 +162,9 @@ fn build_cors_layer(cors_config: Option<&CorsConfig>) -> CorsLayer {
     if config.allow_headers.is_empty() || config.allow_headers.iter().any(|h| h == "*") {
         layer = layer.allow_headers(Any);
     } else {
-        let headers: Vec<axum::http::header::HeaderName> = config.allow_headers.iter()
+        let headers: Vec<axum::http::header::HeaderName> = config
+            .allow_headers
+            .iter()
             .filter_map(|h| h.parse().ok())
             .collect();
         layer = layer.allow_headers(headers);
@@ -147,7 +172,9 @@ fn build_cors_layer(cors_config: Option<&CorsConfig>) -> CorsLayer {
 
     // Expose headers
     if !config.expose_headers.is_empty() {
-        let headers: Vec<axum::http::header::HeaderName> = config.expose_headers.iter()
+        let headers: Vec<axum::http::header::HeaderName> = config
+            .expose_headers
+            .iter()
             .filter_map(|h| h.parse().ok())
             .collect();
         layer = layer.expose_headers(headers);
@@ -242,7 +269,9 @@ pub async fn start_multi_gateway(
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
 
     for binding in &bindings {
-        let gateway = config.gateways.iter()
+        let gateway = config
+            .gateways
+            .iter()
             .find(|g| g.resource_name == binding.gateway_resource)
             .ok_or_else(|| anyhow::anyhow!("Gateway '{}' not found", binding.gateway_resource))?;
 
@@ -271,8 +300,9 @@ pub async fn start_multi_gateway(
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         let handle = tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(addr).await
-                .map_err(|e| anyhow::anyhow!("Failed to bind {} on port {}: {}", gw_name, addr.port(), e))?;
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                anyhow::anyhow!("Failed to bind {} on port {}: {}", gw_name, addr.port(), e)
+            })?;
             tracing::info!("🌐 {} listening on http://{}", gw_name, addr);
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
@@ -356,28 +386,26 @@ fn start_watcher(
     // We need a handle to the tokio runtime to spawn reload tasks
     let rt_handle = tokio::runtime::Handle::current();
 
-    let handle = crate::watcher::start_watching(watch_config, move |change| {
-        match &change {
-            FileChange::Terraform(path) => {
-                tracing::info!("📝 Terraform changed: {}", path.display());
-                let state = state.clone();
-                rt_handle.spawn(async move {
-                    state.pool.invalidate_all().await;
-                    if let Err(e) = state.reload().await {
-                        tracing::error!("❌ Reload failed: {}", e);
-                    }
-                });
-            }
-            FileChange::Source(path) => {
-                tracing::info!(
-                    "📝 Source changed: {} — killing warm workers",
-                    path.display()
-                );
-                let pool = state.pool.clone();
-                rt_handle.spawn(async move {
-                    pool.invalidate_all().await;
-                });
-            }
+    let handle = crate::watcher::start_watching(watch_config, move |change| match &change {
+        FileChange::Terraform(path) => {
+            tracing::info!("📝 Terraform changed: {}", path.display());
+            let state = state.clone();
+            rt_handle.spawn(async move {
+                state.pool.invalidate_all().await;
+                if let Err(e) = state.reload().await {
+                    tracing::error!("❌ Reload failed: {}", e);
+                }
+            });
+        }
+        FileChange::Source(path) => {
+            tracing::info!(
+                "📝 Source changed: {} — killing warm workers",
+                path.display()
+            );
+            let pool = state.pool.clone();
+            rt_handle.spawn(async move {
+                pool.invalidate_all().await;
+            });
         }
     })?;
 
@@ -424,20 +452,37 @@ async fn handle_request(
     let query_str = if query.is_empty() {
         String::new()
     } else {
-        format!("?{}", query.iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("&"))
+        format!(
+            "?{}",
+            query
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("&")
+        )
     };
 
     let body_size = body.len();
-    let content_type = headers.get("content-type")
+    let content_type = headers
+        .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-")
         .to_string();
 
-    tracing::info!("→ {} {}{}{}", method, path, query_str,
-        if body_size > 0 { format!(" [body: {}, type: {}]", format_bytes(body_size), content_type) } else { String::new() }
+    tracing::info!(
+        "→ {} {}{}{}",
+        method,
+        path,
+        query_str,
+        if body_size > 0 {
+            format!(
+                " [body: {}, type: {}]",
+                format_bytes(body_size),
+                content_type
+            )
+        } else {
+            String::new()
+        }
     );
 
     // Convert method to our enum
@@ -460,7 +505,13 @@ async fn handle_request(
         Some(m) => m,
         None => {
             let duration = request_start.elapsed();
-            tracing::warn!("← ⚠️ 404 {} {}{} [{}] no matching route", method, path, query_str, format_duration(duration));
+            tracing::warn!(
+                "← ⚠️ 404 {} {}{} [{}] no matching route",
+                method,
+                path,
+                query_str,
+                format_duration(duration)
+            );
             let body = serde_json::json!({
                 "message": format!("No route matched: {} {}", method, path),
                 "hint": "Run `lambdaform config` to see available routes"
@@ -470,15 +521,23 @@ async fn handle_request(
     };
 
     // Build resource path (with parameter placeholders)
-    let resource_path = matched.resource_path.clone().unwrap_or_else(|| path.clone());
+    let resource_path = matched
+        .resource_path
+        .clone()
+        .unwrap_or_else(|| path.clone());
 
     // Build request context (matches real AWS API Gateway)
     let request_context = crate::runtime::RequestContext {
         stage: "local".to_string(),
         resource_path: resource_path.clone(),
         http_method: method.to_string(),
-        request_id: format!("lambdaform-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+        request_id: format!(
+            "lambdaform-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ),
         api_id: "lambdaform".to_string(),
         path: path.clone(),
         identity: crate::runtime::RequestIdentity {
@@ -496,7 +555,11 @@ async fn handle_request(
         } else {
             Some(matched.path_params)
         },
-        query_string_parameters: if query.is_empty() { None } else { Some(query.clone()) },
+        query_string_parameters: if query.is_empty() {
+            None
+        } else {
+            Some(query.clone())
+        },
         headers: Some(
             headers
                 .iter()
@@ -522,16 +585,27 @@ async fn handle_request(
     if let Some(auth_fn) = authorizer_function {
         let auth_event = crate::runtime::AuthorizerEvent {
             auth_type: "TOKEN".to_string(),
-            authorization_token: headers.get("authorization")
+            authorization_token: headers
+                .get("authorization")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
-            method_arn: format!("arn:aws:execute-api:local:000000000000:api/{}/{}", method, path),
+            method_arn: format!(
+                "arn:aws:execute-api:local:000000000000:api/{}/{}",
+                method, path
+            ),
             http_method: method.to_string(),
             path: path.clone(),
-            headers: Some(headers.iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect()),
-            query_string_parameters: if query.is_empty() { None } else { Some(query.clone()) },
+            headers: Some(
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect(),
+            ),
+            query_string_parameters: if query.is_empty() {
+                None
+            } else {
+                Some(query.clone())
+            },
         };
 
         let auth_executor = FunctionExecutor::new(auth_fn, state.source_dir.clone())
@@ -541,7 +615,12 @@ async fn handle_request(
             Ok(result) => {
                 if !result.is_authorized {
                     let duration = request_start.elapsed();
-                    tracing::warn!("← ⚠️ 401 {} {} [{}] authorizer denied", method, path, format_duration(duration));
+                    tracing::warn!(
+                        "← ⚠️ 401 {} {} [{}] authorizer denied",
+                        method,
+                        path,
+                        format_duration(duration)
+                    );
                     let body = serde_json::json!({
                         "message": "Unauthorized",
                     });
@@ -576,19 +655,34 @@ async fn handle_request(
             let response_body = response.body.unwrap_or_default();
             let response_size = response_body.len();
 
-            let status_icon = if status.is_success() { "✅" }
-                else if status.is_redirection() { "↪️" }
-                else if status.is_client_error() { "⚠️" }
-                else { "❌" };
+            let status_icon = if status.is_success() {
+                "✅"
+            } else if status.is_redirection() {
+                "↪️"
+            } else if status.is_client_error() {
+                "⚠️"
+            } else {
+                "❌"
+            };
 
-            tracing::info!("← {} {} {} {} [{}] → {}",
-                status_icon, status.as_u16(), method, path,
-                format_duration(duration), format_bytes(response_size)
+            tracing::info!(
+                "← {} {} {} {} [{}] → {}",
+                status_icon,
+                status.as_u16(),
+                method,
+                path,
+                format_duration(duration),
+                format_bytes(response_size)
             );
 
             // Log slow requests
             if duration.as_millis() > 3000 {
-                tracing::warn!("🐢 Slow request: {} {} took {}", method, path, format_duration(duration));
+                tracing::warn!(
+                    "🐢 Slow request: {} {} took {}",
+                    method,
+                    path,
+                    format_duration(duration)
+                );
             }
 
             let mut builder = axum::response::Response::builder().status(response.status_code);
@@ -599,11 +693,23 @@ async fn handle_request(
                 }
             }
 
-            builder.body(response_body.into()).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+            builder.body(response_body.into()).unwrap_or_else(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build response",
+                )
+                    .into_response()
+            })
         }
         Err(e) => {
             let duration = request_start.elapsed();
-            tracing::error!("← ❌ 500 {} {} [{}] error: {}", method, path, format_duration(duration), e);
+            tracing::error!(
+                "← ❌ 500 {} {} [{}] error: {}",
+                method,
+                path,
+                format_duration(duration),
+                e
+            );
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
@@ -693,46 +799,61 @@ pub fn resolve_layer_paths(
     layers: &[crate::config::LayerConfig],
     source_dir: &std::path::Path,
 ) -> Vec<std::path::PathBuf> {
-    function.layers.iter().filter_map(|layer_ref| {
-        // Find the layer config by resource name
-        let layer = layers.iter().find(|l| l.resource_name == *layer_ref)?;
-        
-        // Resolve the layer source path
-        if let Some(src) = &layer.source_path {
-            let path = if src.is_absolute() {
-                src.clone()
-            } else {
-                source_dir.join(src)
-            };
-            
-            // If it's a zip file, check for extracted directory alongside it
-            let resolved = if path.extension().map_or(false, |e| e == "zip") {
-                // Look for a directory with the same name minus .zip
-                let dir = path.with_extension("");
-                if dir.is_dir() {
-                    dir
+    function
+        .layers
+        .iter()
+        .filter_map(|layer_ref| {
+            // Find the layer config by resource name
+            let layer = layers.iter().find(|l| l.resource_name == *layer_ref)?;
+
+            // Resolve the layer source path
+            if let Some(src) = &layer.source_path {
+                let path = if src.is_absolute() {
+                    src.clone()
                 } else {
-                    // Try using the zip path parent as the layer dir
-                    path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+                    source_dir.join(src)
+                };
+
+                // If it's a zip file, check for extracted directory alongside it
+                let resolved = if path.extension().map_or(false, |e| e == "zip") {
+                    // Look for a directory with the same name minus .zip
+                    let dir = path.with_extension("");
+                    if dir.is_dir() {
+                        dir
+                    } else {
+                        // Try using the zip path parent as the layer dir
+                        path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+                    }
+                } else if path.is_dir() {
+                    path
+                } else {
+                    // Could be a directory path
+                    path
+                };
+
+                if resolved.exists() {
+                    let resolved = resolved.canonicalize().unwrap_or(resolved);
+                    tracing::info!(
+                        "📦 Layer '{}' resolved to: {}",
+                        layer.layer_name,
+                        resolved.display()
+                    );
+                    Some(resolved)
+                } else {
+                    tracing::warn!(
+                        "⚠️ Layer '{}' path not found: {}",
+                        layer.layer_name,
+                        resolved.display()
+                    );
+                    None
                 }
-            } else if path.is_dir() {
-                path
             } else {
-                // Could be a directory path
-                path
-            };
-            
-            if resolved.exists() {
-                let resolved = resolved.canonicalize().unwrap_or(resolved);
-                tracing::info!("📦 Layer '{}' resolved to: {}", layer.layer_name, resolved.display());
-                Some(resolved)
-            } else {
-                tracing::warn!("⚠️ Layer '{}' path not found: {}", layer.layer_name, resolved.display());
+                tracing::warn!(
+                    "⚠️ Layer '{}' has no source_path configured",
+                    layer.layer_name
+                );
                 None
             }
-        } else {
-            tracing::warn!("⚠️ Layer '{}' has no source_path configured", layer.layer_name);
-            None
-        }
-    }).collect()
+        })
+        .collect()
 }

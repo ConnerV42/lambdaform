@@ -171,7 +171,13 @@ pub struct FunctionExecutor {
 
 impl FunctionExecutor {
     pub fn new(config: LambdaConfig, source_dir: std::path::PathBuf) -> Self {
-        Self { config, source_dir, debug: None, pool: None, layer_paths: Vec::new() }
+        Self {
+            config,
+            source_dir,
+            debug: None,
+            pool: None,
+            layer_paths: Vec::new(),
+        }
     }
 
     pub fn with_debug(mut self, debug: Option<DebugOptions>) -> Self {
@@ -188,18 +194,20 @@ impl FunctionExecutor {
         self.layer_paths = layer_paths;
         self
     }
-    
+
     /// Build environment variables with layer paths added to NODE_PATH/PYTHONPATH
     fn env_with_layers(&self) -> HashMap<String, String> {
         let mut env = self.config.environment.clone();
-        
+
         if self.layer_paths.is_empty() {
             return env;
         }
-        
+
         // For Node.js layers: content is in nodejs/node_modules
         if self.config.runtime.is_nodejs() {
-            let layer_node_paths: Vec<String> = self.layer_paths.iter()
+            let layer_node_paths: Vec<String> = self
+                .layer_paths
+                .iter()
                 .flat_map(|p| {
                     // AWS Lambda layers can have code in:
                     // - nodejs/node_modules (most common)
@@ -221,7 +229,7 @@ impl FunctionExecutor {
                     paths
                 })
                 .collect();
-            
+
             if !layer_node_paths.is_empty() {
                 let existing = env.get("NODE_PATH").cloned().unwrap_or_default();
                 let combined = if existing.is_empty() {
@@ -233,10 +241,12 @@ impl FunctionExecutor {
                 tracing::debug!("NODE_PATH with layers: {}", env["NODE_PATH"]);
             }
         }
-        
+
         // For Python layers: content is in python/ or python/lib/pythonX.Y/site-packages
         if self.config.runtime.is_python() {
-            let layer_python_paths: Vec<String> = self.layer_paths.iter()
+            let layer_python_paths: Vec<String> = self
+                .layer_paths
+                .iter()
                 .flat_map(|p| {
                     let mut paths = Vec::new();
                     let python_dir = p.join("python");
@@ -258,7 +268,7 @@ impl FunctionExecutor {
                     paths
                 })
                 .collect();
-            
+
             if !layer_python_paths.is_empty() {
                 let existing = env.get("PYTHONPATH").cloned().unwrap_or_default();
                 let combined = if existing.is_empty() {
@@ -270,7 +280,7 @@ impl FunctionExecutor {
                 tracing::debug!("PYTHONPATH with layers: {}", env["PYTHONPATH"]);
             }
         }
-        
+
         env
     }
 
@@ -278,7 +288,7 @@ impl FunctionExecutor {
     fn use_pool(&self) -> bool {
         self.pool.is_some() && self.debug.is_none()
     }
-    
+
     /// Invoke the Lambda function as an authorizer
     pub async fn invoke_authorizer(&self, event: AuthorizerEvent) -> Result<AuthorizerResult> {
         let context = LambdaContext {
@@ -291,73 +301,81 @@ impl FunctionExecutor {
                 self.config.function_name
             ),
         };
-        
+
         let payload = serde_json::json!({
             "event": event,
             "context": context,
         });
-        
+
         // Execute using the same runtime as regular invocation
         let raw_response = match &self.config.runtime {
-            Runtime::Nodejs18 | Runtime::Nodejs20 => {
-                self.invoke_nodejs_raw(&payload).await?
-            }
+            Runtime::Nodejs18 | Runtime::Nodejs20 => self.invoke_nodejs_raw(&payload).await?,
             Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
                 self.invoke_python_raw(&payload).await?
             }
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
                 // Go authorizer: send auth event directly
-                self.invoke_go_with_rie(&serde_json::to_value(&event)?).await?
+                self.invoke_go_with_rie(&serde_json::to_value(&event)?)
+                    .await?
             }
             _ => {
-                anyhow::bail!("Unsupported runtime for authorizer: {:?}", self.config.runtime)
+                anyhow::bail!(
+                    "Unsupported runtime for authorizer: {:?}",
+                    self.config.runtime
+                )
             }
         };
-        
+
         // Parse authorizer response
         // V1 TOKEN/REQUEST authorizers return an IAM policy with "Allow" or "Deny"
         // V2 simple response: { "isAuthorized": true/false, "context": {...} }
-        
+
         // Check for simple format first (v2 style)
         if let Some(is_auth) = raw_response.get("isAuthorized").and_then(|v| v.as_bool()) {
             return Ok(AuthorizerResult {
                 is_authorized: is_auth,
-                context: raw_response.get("context").and_then(|c| {
-                    serde_json::from_value(c.clone()).ok()
-                }),
+                context: raw_response
+                    .get("context")
+                    .and_then(|c| serde_json::from_value(c.clone()).ok()),
             });
         }
-        
+
         // Check for IAM policy format (v1 style)
         if let Some(policy) = raw_response.get("policyDocument") {
-            let is_authorized = policy.get("Statement")
+            let is_authorized = policy
+                .get("Statement")
                 .and_then(|s| s.as_array())
-                .map(|stmts| stmts.iter().any(|stmt| {
-                    stmt.get("Effect").and_then(|e| e.as_str()) == Some("Allow")
-                }))
+                .map(|stmts| {
+                    stmts
+                        .iter()
+                        .any(|stmt| stmt.get("Effect").and_then(|e| e.as_str()) == Some("Allow"))
+                })
                 .unwrap_or(false);
-            
+
             return Ok(AuthorizerResult {
                 is_authorized,
-                context: raw_response.get("context").and_then(|c| {
-                    serde_json::from_value(c.clone()).ok()
-                }),
+                context: raw_response
+                    .get("context")
+                    .and_then(|c| serde_json::from_value(c.clone()).ok()),
             });
         }
-        
+
         // If response doesn't match known formats, deny
-        tracing::warn!("Authorizer returned unrecognized format, denying: {:?}", raw_response);
+        tracing::warn!(
+            "Authorizer returned unrecognized format, denying: {:?}",
+            raw_response
+        );
         Ok(AuthorizerResult {
             is_authorized: false,
             context: None,
         })
     }
-    
+
     /// Invoke and return raw JSON value (used by authorizer)
     async fn invoke_nodejs_raw(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let (file, func) = parse_handler(&self.config.handler)?;
         let handler_path = find_handler_file(&self.source_dir, file, "js")?;
-        
+
         let bootstrap = format!(
             r#"
 const handler = require('{}');
@@ -375,34 +393,46 @@ process.stdin.once('data', async (data) => {{
     }}
 }});
 "#,
-            handler_path.display(), func
+            handler_path.display(),
+            func
         );
-        
+
         let mut child = Command::new("node")
-            .arg("-e").arg(&bootstrap)
+            .arg("-e")
+            .arg(&bootstrap)
             .current_dir(&self.source_dir)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .envs(&self.env_with_layers())
-            .spawn().context("Failed to spawn Node.js process")?;
-        
+            .spawn()
+            .context("Failed to spawn Node.js process")?;
+
         let mut stdin = child.stdin.take().context("Failed to capture stdin")?;
-        stdin.write_all(serde_json::to_string(payload)?.as_bytes()).await?;
+        stdin
+            .write_all(serde_json::to_string(payload)?.as_bytes())
+            .await?;
         stdin.flush().await?;
         drop(stdin);
-        
+
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
         let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
             .await
-            .map_err(|_| anyhow::anyhow!(
-                "Task timed out after {}.00 seconds (configured timeout: {}s)",
-                self.config.timeout, self.config.timeout
-            ))??;
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Task timed out after {}.00 seconds (configured timeout: {}s)",
+                    self.config.timeout,
+                    self.config.timeout
+                )
+            })??;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         for line in stdout.lines() {
             if let Ok(result) = serde_json::from_str::<RuntimeResult>(line) {
                 if result.success {
-                    return result.result.ok_or_else(|| anyhow::anyhow!("No result from authorizer"));
+                    return result
+                        .result
+                        .ok_or_else(|| anyhow::anyhow!("No result from authorizer"));
                 } else {
                     anyhow::bail!("Authorizer error: {}", result.error.unwrap_or_default());
                 }
@@ -410,12 +440,12 @@ process.stdin.once('data', async (data) => {{
         }
         anyhow::bail!("No valid response from authorizer Lambda")
     }
-    
+
     /// Invoke Python and return raw JSON value (used by authorizer)
     async fn invoke_python_raw(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let (file, func) = parse_handler(&self.config.handler)?;
         let handler_path = find_handler_file(&self.source_dir, file, "py")?;
-        
+
         let bootstrap = format!(
             r#"
 import sys
@@ -434,34 +464,46 @@ try:
 except Exception as e:
     print(json.dumps({{"success": False, "error": str(e)}}))
 "#,
-            handler_path.display(), func
+            handler_path.display(),
+            func
         );
-        
+
         let mut child = Command::new("python3")
-            .arg("-c").arg(&bootstrap)
+            .arg("-c")
+            .arg(&bootstrap)
             .current_dir(&self.source_dir)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .envs(&self.env_with_layers())
-            .spawn().context("Failed to spawn Python process")?;
-        
+            .spawn()
+            .context("Failed to spawn Python process")?;
+
         let mut stdin = child.stdin.take().context("Failed to capture stdin")?;
-        stdin.write_all(serde_json::to_string(payload)?.as_bytes()).await?;
+        stdin
+            .write_all(serde_json::to_string(payload)?.as_bytes())
+            .await?;
         stdin.flush().await?;
         drop(stdin);
-        
+
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
         let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
             .await
-            .map_err(|_| anyhow::anyhow!(
-                "Task timed out after {}.00 seconds (configured timeout: {}s)",
-                self.config.timeout, self.config.timeout
-            ))??;
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Task timed out after {}.00 seconds (configured timeout: {}s)",
+                    self.config.timeout,
+                    self.config.timeout
+                )
+            })??;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         for line in stdout.lines() {
             if let Ok(result) = serde_json::from_str::<RuntimeResult>(line) {
                 if result.success {
-                    return result.result.ok_or_else(|| anyhow::anyhow!("No result from authorizer"));
+                    return result
+                        .result
+                        .ok_or_else(|| anyhow::anyhow!("No result from authorizer"));
                 } else {
                     anyhow::bail!("Authorizer error: {}", result.error.unwrap_or_default());
                 }
@@ -469,13 +511,14 @@ except Exception as e:
         }
         anyhow::bail!("No valid response from authorizer Lambda")
     }
-    
+
     /// Build Go Lambda binary. Returns path to compiled binary.
     async fn build_go(&self) -> Result<std::path::PathBuf> {
-        let source_dir = self.source_dir.canonicalize()
-            .with_context(|| format!("Source directory not found: {}", self.source_dir.display()))?;
+        let source_dir = self.source_dir.canonicalize().with_context(|| {
+            format!("Source directory not found: {}", self.source_dir.display())
+        })?;
         let binary_path = source_dir.join("bootstrap");
-        
+
         // Check if binary already exists and is newer than source
         let needs_build = if binary_path.exists() {
             let bin_modified = std::fs::metadata(&binary_path)?.modified()?;
@@ -499,7 +542,7 @@ except Exception as e:
         } else {
             true
         };
-        
+
         if needs_build {
             tracing::info!("Building Go Lambda in {}", source_dir.display());
             let output = Command::new("go")
@@ -510,32 +553,37 @@ except Exception as e:
                 .output()
                 .await
                 .context("Failed to run `go build`. Is Go installed?")?;
-            
+
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!("Go build failed:\n{}", stderr);
             }
             tracing::info!("Go build complete: {}", binary_path.display());
         }
-        
+
         Ok(binary_path)
     }
-    
+
     /// Run a Go Lambda binary with a mini Runtime Interface Emulator.
     /// The binary polls GET /next for the event, then POSTs the response.
-    async fn invoke_go_with_rie(&self, event_json: &serde_json::Value) -> Result<serde_json::Value> {
+    async fn invoke_go_with_rie(
+        &self,
+        event_json: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let binary_path = self.build_go().await?;
-        
+
         let request_id = uuid_simple();
         let event_bytes: Vec<u8> = serde_json::to_vec(event_json)?;
-        
+
         // Shared state for the mini RIE
         let response: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
         let response_ready = Arc::new(Notify::new());
-        
+
         // Build axum router for the Lambda Runtime API
-        use axum::{Router, routing::get, routing::post, extract::State, body::Bytes, http::StatusCode};
-        
+        use axum::{
+            body::Bytes, extract::State, http::StatusCode, routing::get, routing::post, Router,
+        };
+
         #[derive(Clone)]
         struct RieState {
             event: Vec<u8>,
@@ -543,14 +591,14 @@ except Exception as e:
             response: Arc<Mutex<Option<serde_json::Value>>>,
             response_ready: Arc<Notify>,
         }
-        
+
         let state = RieState {
             event: event_bytes,
             request_id: request_id,
             response: response.clone(),
             response_ready: response_ready.clone(),
         };
-        
+
         let app = Router::new()
             .route(
                 "/2018-06-01/runtime/invocation/next",
@@ -563,16 +611,17 @@ except Exception as e:
                         ],
                         s.event,
                     )
-                })
+                }),
             )
             .route(
                 "/2018-06-01/runtime/invocation/:request_id/response",
                 post(|State(s): State<RieState>, body: Bytes| async move {
-                    let val: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                    let val: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
                     *s.response.lock().await = Some(val);
                     s.response_ready.notify_one();
                     StatusCode::ACCEPTED
-                })
+                }),
             )
             .route(
                 "/2018-06-01/runtime/invocation/:request_id/error",
@@ -581,18 +630,18 @@ except Exception as e:
                     *s.response.lock().await = Some(serde_json::json!({"errorMessage": err_str}));
                     s.response_ready.notify_one();
                     StatusCode::ACCEPTED
-                })
+                }),
             )
             .with_state(state);
-        
+
         // Bind to random port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
-        
+
         let server_handle = tokio::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
-        
+
         // Run the Go binary
         let mut child = Command::new(&binary_path)
             .current_dir(&self.source_dir)
@@ -603,35 +652,42 @@ except Exception as e:
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("Failed to spawn Go binary: {}", binary_path.display()))?;
-        
+
         // Wait for response with timeout
         let timeout = tokio::time::timeout(
             std::time::Duration::from_secs(self.config.timeout as u64 + 5),
-            response_ready.notified()
-        ).await;
-        
+            response_ready.notified(),
+        )
+        .await;
+
         // Kill the child process and server
         child.kill().await.ok();
         server_handle.abort();
-        
+
         if timeout.is_err() {
             anyhow::bail!("Go Lambda timed out after {}s", self.config.timeout);
         }
-        
-        let result = response.lock().await.take()
+
+        let result = response
+            .lock()
+            .await
+            .take()
             .ok_or_else(|| anyhow::anyhow!("No response from Go Lambda"))?;
-        
+
         // Check for error
         if let Some(err) = result.get("errorMessage").and_then(|v| v.as_str()) {
             anyhow::bail!("Go Lambda error: {}", err);
         }
-        
+
         Ok(result)
     }
-    
+
     /// Invoke the Lambda function with an event
     /// Invoke with a raw JSON event (for SQS/SNS/DynamoDB triggers — not API Gateway format)
-    pub async fn invoke_raw_event(&self, raw_event: serde_json::Value) -> Result<serde_json::Value> {
+    pub async fn invoke_raw_event(
+        &self,
+        raw_event: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let context = LambdaContext {
             function_name: self.config.function_name.clone(),
             function_version: "$LATEST".to_string(),
@@ -642,37 +698,44 @@ except Exception as e:
                 self.config.function_name
             ),
         };
-        
+
         let payload = serde_json::json!({
             "event": raw_event,
             "context": context,
         });
-        
+
         // Use pool for Node.js/Python when available and not debugging
         if self.use_pool() {
             match &self.config.runtime {
-                Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
-                    let pool = self.pool.as_ref().expect("Pool should be initialized when use_pool() is true");
+                Runtime::Nodejs18
+                | Runtime::Nodejs20
+                | Runtime::Python310
+                | Runtime::Python311
+                | Runtime::Python312 => {
+                    let pool = self
+                        .pool
+                        .as_ref()
+                        .expect("Pool should be initialized when use_pool() is true");
                     let env = self.env_with_layers();
-                    let result = pool.invoke(
-                        &self.config.function_name,
-                        &self.config.runtime,
-                        &self.config.handler,
-                        &self.source_dir,
-                        &env,
-                        &payload["event"],
-                        &payload["context"],
-                    ).await?;
+                    let result = pool
+                        .invoke(
+                            &self.config.function_name,
+                            &self.config.runtime,
+                            &self.config.handler,
+                            &self.source_dir,
+                            &env,
+                            &payload["event"],
+                            &payload["context"],
+                        )
+                        .await?;
                     return Ok(result);
                 }
                 _ => {}
             }
         }
-        
+
         match &self.config.runtime {
-            Runtime::Nodejs18 | Runtime::Nodejs20 => {
-                self.invoke_nodejs_raw(&payload).await
-            }
+            Runtime::Nodejs18 | Runtime::Nodejs20 => self.invoke_nodejs_raw(&payload).await,
             Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
                 self.invoke_python_raw(&payload).await
             }
@@ -684,7 +747,7 @@ except Exception as e:
             }
         }
     }
-    
+
     pub async fn invoke(&self, event: LambdaEvent) -> Result<LambdaResponse> {
         let context = LambdaContext {
             function_name: self.config.function_name.clone(),
@@ -696,27 +759,36 @@ except Exception as e:
                 self.config.function_name
             ),
         };
-        
+
         let payload = serde_json::json!({
             "event": event,
             "context": context,
         });
-        
+
         // Use pool for Node.js/Python when available and not debugging
         if self.use_pool() {
             match &self.config.runtime {
-                Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
-                    let pool = self.pool.as_ref().expect("Pool should be initialized when use_pool() is true");
+                Runtime::Nodejs18
+                | Runtime::Nodejs20
+                | Runtime::Python310
+                | Runtime::Python311
+                | Runtime::Python312 => {
+                    let pool = self
+                        .pool
+                        .as_ref()
+                        .expect("Pool should be initialized when use_pool() is true");
                     let env = self.env_with_layers();
-                    let result = pool.invoke(
-                        &self.config.function_name,
-                        &self.config.runtime,
-                        &self.config.handler,
-                        &self.source_dir,
-                        &env,
-                        &payload["event"],
-                        &payload["context"],
-                    ).await?;
+                    let result = pool
+                        .invoke(
+                            &self.config.function_name,
+                            &self.config.runtime,
+                            &self.config.handler,
+                            &self.source_dir,
+                            &env,
+                            &payload["event"],
+                            &payload["context"],
+                        )
+                        .await?;
                     let response: LambdaResponse = serde_json::from_value(result)?;
                     return Ok(response);
                 }
@@ -725,9 +797,7 @@ except Exception as e:
         }
 
         match &self.config.runtime {
-            Runtime::Nodejs18 | Runtime::Nodejs20 => {
-                self.invoke_nodejs(&payload).await
-            }
+            Runtime::Nodejs18 | Runtime::Nodejs20 => self.invoke_nodejs(&payload).await,
             Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
                 self.invoke_python(&payload).await
             }
@@ -739,14 +809,14 @@ except Exception as e:
             }
         }
     }
-    
+
     /// Invoke Node.js function
     async fn invoke_nodejs(&self, payload: &serde_json::Value) -> Result<LambdaResponse> {
         // Parse handler (e.g., "index.handler" -> file: index.js, function: handler)
         let (file, func) = parse_handler(&self.config.handler)?;
-        
+
         let handler_path = find_handler_file(&self.source_dir, file, "js")?;
-        
+
         // Node.js bootstrap script
         let bootstrap = format!(
             r#"
@@ -768,40 +838,49 @@ process.stdin.once('data', async (data) => {{
             handler_path.display(),
             func
         );
-        
+
         // Check if debug mode is enabled for Node.js
         let debug_enabled = self.debug.as_ref().map_or(false, |d| d.nodejs);
-        
+
         let mut cmd = Command::new("node");
-        
+
         if debug_enabled {
-            let debug_opts = self.debug.as_ref().expect("Debug config should exist when debug_enabled is true");
+            let debug_opts = self
+                .debug
+                .as_ref()
+                .expect("Debug config should exist when debug_enabled is true");
             let flag = if debug_opts.break_on_start {
                 format!("--inspect-brk=0.0.0.0:{}", debug_opts.port)
             } else {
                 format!("--inspect=0.0.0.0:{}", debug_opts.port)
             };
             cmd.arg(&flag);
-            tracing::info!("🔍 Node.js debugger listening on ws://0.0.0.0:{}", debug_opts.port);
+            tracing::info!(
+                "🔍 Node.js debugger listening on ws://0.0.0.0:{}",
+                debug_opts.port
+            );
             tracing::info!("   Open chrome://inspect or attach VS Code to debug");
         }
-        
+
         // When debugging, write bootstrap to a temp file for better source visibility
         // in debugger. Otherwise, use inline -e for speed.
         let _temp_file; // hold reference to keep temp file alive
         if debug_enabled {
-            let tmp = std::env::temp_dir().join(format!("lambdaform-bootstrap-{}.js", 
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default().as_nanos()));
-            std::fs::write(&tmp, &bootstrap)
-                .context("Failed to write debug bootstrap file")?;
+            let tmp = std::env::temp_dir().join(format!(
+                "lambdaform-bootstrap-{}.js",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::write(&tmp, &bootstrap).context("Failed to write debug bootstrap file")?;
             cmd.arg(&tmp);
             _temp_file = Some(tmp);
         } else {
             cmd.arg("-e").arg(&bootstrap);
             _temp_file = None;
         }
-        
+
         let mut child = cmd
             .current_dir(&self.source_dir)
             .stdin(Stdio::piped())
@@ -810,7 +889,7 @@ process.stdin.once('data', async (data) => {{
             .envs(&self.env_with_layers())
             .spawn()
             .context("Failed to spawn Node.js process")?;
-        
+
         // Send payload
         let mut stdin = child.stdin.take().context("Failed to capture stdin")?;
         stdin
@@ -818,17 +897,20 @@ process.stdin.once('data', async (data) => {{
             .await?;
         stdin.flush().await?;
         drop(stdin);
-        
+
         // Read response
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
         let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
             .await
-            .map_err(|_| anyhow::anyhow!(
-                "Task timed out after {}.00 seconds (configured timeout: {}s)",
-                self.config.timeout, self.config.timeout
-            ))??;
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Task timed out after {}.00 seconds (configured timeout: {}s)",
+                    self.config.timeout,
+                    self.config.timeout
+                )
+            })??;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         // Find JSON line in output
         for line in stdout.lines() {
             if let Ok(result) = serde_json::from_str::<RuntimeResult>(line) {
@@ -842,23 +924,30 @@ process.stdin.once('data', async (data) => {{
                 }
             }
         }
-        
+
         anyhow::bail!("No valid response from Lambda")
     }
-    
+
     /// Invoke Python function
     async fn invoke_python(&self, payload: &serde_json::Value) -> Result<LambdaResponse> {
         let (file, func) = parse_handler(&self.config.handler)?;
-        
+
         let handler_path = find_handler_file(&self.source_dir, file, "py")?;
-        
+
         // Check if debug mode is enabled for Python
         let debug_enabled = self.debug.as_ref().map_or(false, |d| d.python);
-        
+
         let debug_preamble = if debug_enabled {
-            let debug_opts = self.debug.as_ref().expect("Debug config should exist when debug_enabled is true");
+            let debug_opts = self
+                .debug
+                .as_ref()
+                .expect("Debug config should exist when debug_enabled is true");
             let port = debug_opts.python_port;
-            let wait = if debug_opts.break_on_start { "True" } else { "False" };
+            let wait = if debug_opts.break_on_start {
+                "True"
+            } else {
+                "False"
+            };
             tracing::info!("🐍 Python debugger (debugpy) listening on 0.0.0.0:{}", port);
             tracing::info!("   Attach VS Code or any DAP client to debug");
             format!(
@@ -874,7 +963,7 @@ if {}:
         } else {
             String::new()
         };
-        
+
         let bootstrap = format!(
             r#"
 import sys
@@ -897,24 +986,27 @@ except Exception as e:
             handler_path.display(),
             func
         );
-        
+
         // When debugging, write bootstrap to a temp file for better source visibility
         let _temp_file;
         let mut cmd = Command::new("python3");
-        
+
         if debug_enabled {
-            let tmp = std::env::temp_dir().join(format!("lambdaform-bootstrap-{}.py",
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default().as_nanos()));
-            std::fs::write(&tmp, &bootstrap)
-                .context("Failed to write debug bootstrap file")?;
+            let tmp = std::env::temp_dir().join(format!(
+                "lambdaform-bootstrap-{}.py",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::write(&tmp, &bootstrap).context("Failed to write debug bootstrap file")?;
             cmd.arg(&tmp);
             _temp_file = Some(tmp);
         } else {
             cmd.arg("-c").arg(&bootstrap);
             _temp_file = None;
         }
-        
+
         let mut child = cmd
             .current_dir(&self.source_dir)
             .stdin(Stdio::piped())
@@ -923,23 +1015,26 @@ except Exception as e:
             .envs(&self.env_with_layers())
             .spawn()
             .context("Failed to spawn Python process")?;
-        
+
         let mut stdin = child.stdin.take().context("Failed to capture stdin")?;
         stdin
             .write_all(serde_json::to_string(payload)?.as_bytes())
             .await?;
         stdin.flush().await?;
         drop(stdin);
-        
+
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
         let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
             .await
-            .map_err(|_| anyhow::anyhow!(
-                "Task timed out after {}.00 seconds (configured timeout: {}s)",
-                self.config.timeout, self.config.timeout
-            ))??;
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Task timed out after {}.00 seconds (configured timeout: {}s)",
+                    self.config.timeout,
+                    self.config.timeout
+                )
+            })??;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         for line in stdout.lines() {
             if let Ok(result) = serde_json::from_str::<RuntimeResult>(line) {
                 if result.success {
@@ -952,10 +1047,10 @@ except Exception as e:
                 }
             }
         }
-        
+
         anyhow::bail!("No valid response from Lambda")
     }
-    
+
     /// Invoke Go function via Runtime Interface Emulator
     async fn invoke_go(&self, payload: &serde_json::Value) -> Result<LambdaResponse> {
         // For Go, the event is the API Gateway event directly (not wrapped in {event, context})
@@ -967,9 +1062,13 @@ except Exception as e:
 }
 
 /// Find handler file by searching common locations. Returns canonical (absolute) path.
-pub fn find_handler_file(source_dir: &std::path::Path, file: &str, ext: &str) -> Result<std::path::PathBuf> {
+pub fn find_handler_file(
+    source_dir: &std::path::Path,
+    file: &str,
+    ext: &str,
+) -> Result<std::path::PathBuf> {
     let filename = format!("{}.{}", file, ext);
-    
+
     // Search order: root, src/, lib/, lambda/
     let candidates = [
         source_dir.join(&filename),
@@ -977,20 +1076,25 @@ pub fn find_handler_file(source_dir: &std::path::Path, file: &str, ext: &str) ->
         source_dir.join("lib").join(&filename),
         source_dir.join("lambda").join(&filename),
     ];
-    
+
     for path in &candidates {
         if path.exists() {
-            let canonical = path.canonicalize()
+            let canonical = path
+                .canonicalize()
                 .with_context(|| format!("Failed to canonicalize {}", path.display()))?;
             tracing::info!("Found handler at: {}", canonical.display());
             return Ok(canonical);
         }
     }
-    
+
     anyhow::bail!(
         "Handler file '{}' not found. Searched: {}",
         filename,
-        candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 
@@ -1087,7 +1191,9 @@ mod tests {
                 request_id: "test-123".to_string(),
                 api_id: "lambdaform".to_string(),
                 path: "/test".to_string(),
-                identity: RequestIdentity { source_ip: "127.0.0.1".to_string() },
+                identity: RequestIdentity {
+                    source_ip: "127.0.0.1".to_string(),
+                },
             },
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -1135,15 +1241,19 @@ mod tests {
     #[tokio::test]
     async fn test_nodejs_timeout_enforcement() {
         use crate::config::LambdaConfig;
-        
+
         let dir = TempDir::new().unwrap();
         // Handler that sleeps longer than timeout
-        std::fs::write(dir.path().join("index.js"), r#"
+        std::fs::write(
+            dir.path().join("index.js"),
+            r#"
             exports.handler = async (event, context) => {
                 await new Promise(resolve => setTimeout(resolve, 60000));
                 return { statusCode: 200, body: "should not reach" };
             };
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let config = LambdaConfig {
             resource_name: "test".to_string(),
@@ -1173,13 +1283,19 @@ mod tests {
                 request_id: "test-timeout".to_string(),
                 api_id: "lambdaform".to_string(),
                 path: "/test".to_string(),
-                identity: RequestIdentity { source_ip: "127.0.0.1".to_string() },
+                identity: RequestIdentity {
+                    source_ip: "127.0.0.1".to_string(),
+                },
             },
         };
 
         let result = executor.invoke(event).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("timed out"), "Expected timeout error, got: {}", err);
+        assert!(
+            err.contains("timed out"),
+            "Expected timeout error, got: {}",
+            err
+        );
     }
 }

@@ -9,10 +9,10 @@ use std::time::Duration;
 pub struct WatchConfig {
     /// Directories to watch
     pub watch_paths: Vec<std::path::PathBuf>,
-    
+
     /// File patterns to ignore
     pub ignore_patterns: Vec<String>,
-    
+
     /// Debounce duration
     pub debounce_ms: u64,
 }
@@ -37,7 +37,7 @@ impl Default for WatchConfig {
 pub enum FileChange {
     /// Source file changed (need to reload function)
     Source(std::path::PathBuf),
-    
+
     /// Terraform file changed (need to reload config)
     Terraform(std::path::PathBuf),
 }
@@ -53,19 +53,14 @@ pub fn start_watching(
     callback: impl Fn(FileChange) + Send + 'static,
 ) -> anyhow::Result<WatchHandle> {
     let (tx, rx) = mpsc::channel();
-    
-    let mut debouncer = new_debouncer(
-        Duration::from_millis(config.debounce_ms),
-        tx,
-    )?;
-    
+
+    let mut debouncer = new_debouncer(Duration::from_millis(config.debounce_ms), tx)?;
+
     for path in &config.watch_paths {
-        debouncer
-            .watcher()
-            .watch(path, RecursiveMode::Recursive)?;
+        debouncer.watcher().watch(path, RecursiveMode::Recursive)?;
         tracing::debug!("Watching: {}", path.display());
     }
-    
+
     // Process events in a background thread
     std::thread::spawn(move || {
         for result in rx {
@@ -83,17 +78,16 @@ pub fn start_watching(
             }
         }
     });
-    
-    Ok(WatchHandle { _debouncer: debouncer })
+
+    Ok(WatchHandle {
+        _debouncer: debouncer,
+    })
 }
 
 /// Process a debounced event into a FileChange
-fn process_event(
-    event: &DebouncedEvent,
-    ignore_patterns: &[String],
-) -> Option<FileChange> {
+fn process_event(event: &DebouncedEvent, ignore_patterns: &[String]) -> Option<FileChange> {
     let path = &event.path;
-    
+
     // Check ignore patterns
     let path_str = path.to_string_lossy();
     for pattern in ignore_patterns {
@@ -101,15 +95,13 @@ fn process_event(
             return None;
         }
     }
-    
+
     // Determine change type
     let extension = path.extension()?.to_str()?;
-    
+
     match extension {
         "tf" | "tfvars" => Some(FileChange::Terraform(path.clone())),
-        "js" | "ts" | "mjs" | "cjs" | "py" | "go" | "rs" => {
-            Some(FileChange::Source(path.clone()))
-        }
+        "js" | "ts" | "mjs" | "cjs" | "py" | "go" | "rs" => Some(FileChange::Source(path.clone())),
         _ => None,
     }
 }
@@ -117,25 +109,25 @@ fn process_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_ignore_patterns() {
         let event = DebouncedEvent {
             path: std::path::PathBuf::from("/project/node_modules/test.js"),
             kind: notify_debouncer_mini::DebouncedEventKind::Any,
         };
-        
+
         let ignore = vec!["node_modules".to_string()];
         assert!(process_event(&event, &ignore).is_none());
     }
-    
+
     #[test]
     fn test_tf_detection() {
         let event = DebouncedEvent {
             path: std::path::PathBuf::from("/project/main.tf"),
             kind: notify_debouncer_mini::DebouncedEventKind::Any,
         };
-        
+
         let change = process_event(&event, &[]);
         assert!(matches!(change, Some(FileChange::Terraform(_))));
     }

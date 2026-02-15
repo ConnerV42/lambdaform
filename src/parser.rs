@@ -32,7 +32,7 @@ impl VariableResolver {
     /// Build a resolver with additional -var-file paths.
     pub fn from_dir_with_var_files(dir: &Path, var_files: &[std::path::PathBuf]) -> Result<Self> {
         let mut resolver = Self::default();
-        
+
         // Pass 1: Collect variable defaults from .tf files
         let mut tf_files: Vec<_> = Vec::new();
         for entry in WalkDir::new(dir)
@@ -46,7 +46,7 @@ impl VariableResolver {
                 tf_files.push(path);
             }
         }
-        
+
         for path in &tf_files {
             let content = fs::read_to_string(path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -54,13 +54,13 @@ impl VariableResolver {
                 resolver.collect_variable_defaults(&body);
             }
         }
-        
+
         // Pass 2: Load terraform.tfvars (auto-loaded by Terraform)
         let tfvars_path = dir.join("terraform.tfvars");
         if tfvars_path.exists() {
             resolver.load_tfvars(&tfvars_path)?;
         }
-        
+
         // Pass 3: Load *.auto.tfvars (alphabetical order)
         let mut auto_tfvars: Vec<_> = Vec::new();
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -75,22 +75,25 @@ impl VariableResolver {
         for path in &auto_tfvars {
             resolver.load_tfvars(path)?;
         }
-        
+
         // Pass 4: Load explicit -var-file paths (highest priority)
         for path in var_files {
             resolver.load_tfvars(path)?;
         }
-        
+
         if !resolver.variables.is_empty() {
-            tracing::info!("Resolved {} Terraform variable(s)", resolver.variables.len());
+            tracing::info!(
+                "Resolved {} Terraform variable(s)",
+                resolver.variables.len()
+            );
             for (k, v) in &resolver.variables {
                 tracing::debug!("  var.{} = {:?}", k, v);
             }
         }
-        
+
         Ok(resolver)
     }
-    
+
     /// Extract default values from `variable` blocks.
     fn collect_variable_defaults(&mut self, body: &hcl::Body) {
         for block in body.blocks() {
@@ -109,32 +112,32 @@ impl VariableResolver {
             }
         }
     }
-    
+
     /// Load variable values from a .tfvars file.
     fn load_tfvars(&mut self, path: &Path) -> Result<()> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
         let body: hcl::Body = hcl::from_str(&content)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
-        
+
         for attr in body.attributes() {
             let key = attr.key.to_string();
             if let Some(val) = expr_to_string(&attr.expr) {
                 self.variables.insert(key, val);
             }
         }
-        
+
         tracing::debug!("Loaded tfvars from {}", path.display());
         Ok(())
     }
-    
+
     /// Resolve a string that may contain `var.xxx` references.
     /// Handles both bare traversals (`var.prefix`) and template interpolation (`"${var.prefix}-api"`).
     pub fn resolve(&self, value: &str) -> String {
         if self.variables.is_empty() || !value.contains("var.") {
             return value.to_string();
         }
-        
+
         // Replace ${var.name} interpolations
         let mut result = value.to_string();
         for (name, val) in &self.variables {
@@ -143,7 +146,7 @@ impl VariableResolver {
         }
         result
     }
-    
+
     /// Resolve a traversal expression like `var.prefix` to its value.
     pub fn resolve_traversal(&self, traversal_str: &str) -> Option<String> {
         if let Some(var_name) = traversal_str.strip_prefix("var.") {
@@ -171,11 +174,14 @@ pub fn parse_terraform_dir(dir: &Path) -> Result<LambdaformConfig> {
 }
 
 /// Parse all Terraform files in a directory with additional -var-file paths
-pub fn parse_terraform_dir_with_var_files(dir: &Path, var_files: &[std::path::PathBuf]) -> Result<LambdaformConfig> {
+pub fn parse_terraform_dir_with_var_files(
+    dir: &Path,
+    var_files: &[std::path::PathBuf],
+) -> Result<LambdaformConfig> {
     let resolver = VariableResolver::from_dir_with_var_files(dir, var_files)?;
-    
+
     let mut config = LambdaformConfig::default();
-    
+
     // Find all .tf files
     for entry in WalkDir::new(dir)
         .max_depth(2) // Don't recurse too deep
@@ -189,7 +195,7 @@ pub fn parse_terraform_dir_with_var_files(dir: &Path, var_files: &[std::path::Pa
             parse_tf_file(path, &mut config, &resolver)?;
         }
     }
-    
+
     Ok(config)
 }
 
@@ -260,14 +266,18 @@ struct Apigwv2Integration {
 }
 
 /// Parse a single .tf file
-fn parse_tf_file(path: &Path, config: &mut LambdaformConfig, resolver: &VariableResolver) -> Result<()> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    
+fn parse_tf_file(
+    path: &Path,
+    config: &mut LambdaformConfig,
+    resolver: &VariableResolver,
+) -> Result<()> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+
     // Parse HCL
     let body: hcl::Body = hcl::from_str(&content)
         .with_context(|| format!("Failed to parse HCL in {}", path.display()))?;
-    
+
     let mut apigw_resources: Vec<ApigwResource> = Vec::new();
     let mut apigw_methods: Vec<ApigwMethod> = Vec::new();
     let mut apigw_integrations: Vec<ApigwIntegration> = Vec::new();
@@ -275,7 +285,7 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig, resolver: &Variable
     let mut apigwv2_integrations: Vec<Apigwv2Integration> = Vec::new();
     let mut apigw_authorizers: Vec<ApigwAuthorizer> = Vec::new();
     let mut apigwv2_authorizers: Vec<Apigwv2Authorizer> = Vec::new();
-    
+
     // Extract resource blocks
     for block in body.blocks() {
         let identifier = block.identifier.to_string();
@@ -284,10 +294,12 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig, resolver: &Variable
             if labels.len() >= 2 {
                 let resource_type = &labels[0];
                 let resource_name = &labels[1];
-                
+
                 match resource_type.as_str() {
                     "aws_lambda_function" => {
-                        if let Some(lambda) = parse_lambda_function(&resource_name, block, resolver)? {
+                        if let Some(lambda) =
+                            parse_lambda_function(&resource_name, block, resolver)?
+                        {
                             config.functions.push(lambda);
                         }
                     }
@@ -371,13 +383,24 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig, resolver: &Variable
             }
         }
     }
-    
+
     // Resolve API Gateway v1 routes from resource→method→integration chain
-    resolve_api_gateway_routes(config, &apigw_resources, &apigw_methods, &apigw_integrations, &apigw_authorizers);
-    
+    resolve_api_gateway_routes(
+        config,
+        &apigw_resources,
+        &apigw_methods,
+        &apigw_integrations,
+        &apigw_authorizers,
+    );
+
     // Resolve API Gateway v2 routes from route→integration chain
-    resolve_apigatewayv2_routes(config, &apigwv2_routes, &apigwv2_integrations, &apigwv2_authorizers);
-    
+    resolve_apigatewayv2_routes(
+        config,
+        &apigwv2_routes,
+        &apigwv2_integrations,
+        &apigwv2_authorizers,
+    );
+
     Ok(())
 }
 
@@ -410,7 +433,9 @@ fn parse_apigw_integration(block: &hcl::Block) -> Option<ApigwIntegration> {
     Some(ApigwIntegration {
         rest_api_ref: get_traversal_attr(body, "rest_api_id").unwrap_or_default(),
         resource_ref: get_traversal_attr(body, "resource_id").unwrap_or_default(),
-        http_method_ref: get_traversal_attr(body, "http_method").or_else(|| get_string_attr(body, "http_method")).unwrap_or_default(),
+        http_method_ref: get_traversal_attr(body, "http_method")
+            .or_else(|| get_string_attr(body, "http_method"))
+            .unwrap_or_default(),
         lambda_uri_ref: get_traversal_attr(body, "uri"),
     })
 }
@@ -428,7 +453,7 @@ fn resolve_api_gateway_routes(
         .iter()
         .map(|r| (r.resource_name.clone(), r.path_part.clone()))
         .collect();
-    
+
     // Build resource name → parent resource name lookup for nested path resolution
     let resource_parents: HashMap<String, String> = resources
         .iter()
@@ -442,7 +467,7 @@ fn resolve_api_gateway_routes(
             }
         })
         .collect();
-    
+
     // Build authorizer name → AuthorizerConfig lookup
     let authorizer_map: HashMap<String, AuthorizerConfig> = authorizers
         .iter()
@@ -452,11 +477,20 @@ fn resolve_api_gateway_routes(
                 "COGNITO_USER_POOLS" => AuthorizerType::Cognito,
                 _ => AuthorizerType::Lambda,
             };
-            let function_resource = a.lambda_uri_ref.as_ref().map(|uri| extract_lambda_name_from_ref(uri));
-            Some((a.resource_name.clone(), AuthorizerConfig { auth_type, function_resource }))
+            let function_resource = a
+                .lambda_uri_ref
+                .as_ref()
+                .map(|uri| extract_lambda_name_from_ref(uri));
+            Some((
+                a.resource_name.clone(),
+                AuthorizerConfig {
+                    auth_type,
+                    function_resource,
+                },
+            ))
         })
         .collect();
-    
+
     // For each integration, find the matching method and resource to build a route
     for integration in integrations {
         // Extract lambda function resource name from uri ref
@@ -464,24 +498,24 @@ fn resolve_api_gateway_routes(
             Some(uri) => extract_lambda_name_from_ref(uri),
             None => continue,
         };
-        
+
         let apigw_resource_name = extract_resource_name_from_ref(&integration.resource_ref);
-        
+
         let path_part = match resource_paths.get(&apigw_resource_name) {
             Some(p) => p,
             None => continue,
         };
-        
+
         // Find the method for this resource
-        let method = methods.iter().find(|m| {
-            extract_resource_name_from_ref(&m.resource_ref) == apigw_resource_name
-        });
-        
+        let method = methods
+            .iter()
+            .find(|m| extract_resource_name_from_ref(&m.resource_ref) == apigw_resource_name);
+
         let http_method = match &method {
             Some(m) => parse_http_method(&m.http_method),
             None => HttpMethod::Any,
         };
-        
+
         // Resolve authorizer from method's authorizer_id ref
         let authorizer = method.and_then(|m| {
             m.authorizer_ref.as_ref().and_then(|ref_str| {
@@ -489,7 +523,7 @@ fn resolve_api_gateway_routes(
                 authorizer_map.get(&auth_name).cloned()
             })
         });
-        
+
         // Walk parent chain to build full nested path (e.g. /api/v1/users/{id})
         let path = {
             let mut parts = vec![path_part.as_str()];
@@ -511,21 +545,29 @@ fn resolve_api_gateway_routes(
             parts.reverse();
             format!("/{}", parts.join("/"))
         };
-        
+
         let route = RouteConfig {
             method: http_method,
             path,
             function_resource: lambda_resource,
             authorizer,
         };
-        
+
         if let Some(gateway) = config.gateways.first_mut() {
             if route.authorizer.is_some() {
-                tracing::info!("Resolved route: {} {} → {} (with authorizer)", 
-                    route.method_str(), route.path, route.function_resource);
+                tracing::info!(
+                    "Resolved route: {} {} → {} (with authorizer)",
+                    route.method_str(),
+                    route.path,
+                    route.function_resource
+                );
             } else {
-                tracing::info!("Resolved route: {} {} → {}", 
-                    route.method_str(), route.path, route.function_resource);
+                tracing::info!(
+                    "Resolved route: {} {} → {}",
+                    route.method_str(),
+                    route.path,
+                    route.function_resource
+                );
             }
             gateway.routes.push(route);
         }
@@ -536,15 +578,16 @@ fn resolve_api_gateway_routes(
 fn parse_apigatewayv2_api(name: &str, block: &hcl::Block) -> Result<Option<ApiGatewayConfig>> {
     let body = &block.body;
     let api_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
-    let protocol_type = get_string_attr(body, "protocol_type").unwrap_or_else(|| "HTTP".to_string());
+    let protocol_type =
+        get_string_attr(body, "protocol_type").unwrap_or_else(|| "HTTP".to_string());
     let route_selection_expression = get_string_attr(body, "route_selection_expression");
-    
+
     let api_type = if protocol_type.eq_ignore_ascii_case("WEBSOCKET") {
         ApiType::WebSocket
     } else {
         ApiType::Http
     };
-    
+
     Ok(Some(ApiGatewayConfig {
         resource_name: name.to_string(),
         name: api_name,
@@ -572,7 +615,8 @@ fn parse_apigwv2_authorizer(name: &str, block: &hcl::Block) -> Option<Apigwv2Aut
         resource_name: name.to_string(),
         api_ref: get_traversal_attr(body, "api_id").unwrap_or_default(),
         lambda_uri_ref: get_traversal_attr(body, "authorizer_uri"),
-        auth_type: get_string_attr(body, "authorizer_type").unwrap_or_else(|| "REQUEST".to_string()),
+        auth_type: get_string_attr(body, "authorizer_type")
+            .unwrap_or_else(|| "REQUEST".to_string()),
     })
 }
 
@@ -585,7 +629,13 @@ fn parse_apigatewayv2_route(name: &str, block: &hcl::Block) -> Option<Apigwv2Rou
         route_key: get_string_attr(body, "route_key")?,
         target_ref: get_traversal_attr(body, "target").or_else(|| get_string_attr(body, "target")),
         authorizer_ref: get_traversal_attr(body, "authorization_type")
-            .and_then(|t| if t == "NONE" { None } else { get_traversal_attr(body, "authorizer_id") })
+            .and_then(|t| {
+                if t == "NONE" {
+                    None
+                } else {
+                    get_traversal_attr(body, "authorizer_id")
+                }
+            })
             .or_else(|| get_traversal_attr(body, "authorizer_id")),
     })
 }
@@ -616,11 +666,11 @@ fn resolve_apigatewayv2_routes(
             Some((i.resource_name.clone(), lambda_name))
         })
         .collect();
-    
+
     for route in routes {
         // Parse route_key: "GET /users/{id}" or "$default"
         let (method, path) = parse_v2_route_key(&route.route_key);
-        
+
         // Resolve target integration → lambda
         // target is like "integrations/${aws_apigatewayv2_integration.name.id}"
         // or via traversal: "aws_apigatewayv2_integration.name.id"
@@ -631,50 +681,66 @@ fn resolve_apigatewayv2_routes(
                 integration_lambdas.get(parts[1]).cloned()
             } else {
                 // Try matching by iterating integrations with same api_ref
-                integrations.iter()
+                integrations
+                    .iter()
                     .find(|i| {
                         // Match by api_ref
-                        extract_resource_name_from_ref(&i.api_ref) == extract_resource_name_from_ref(&route.api_ref)
+                        extract_resource_name_from_ref(&i.api_ref)
+                            == extract_resource_name_from_ref(&route.api_ref)
                     })
                     .and_then(|i| integration_lambdas.get(&i.resource_name).cloned())
             }
         });
-        
+
         let lambda_resource = match lambda_resource {
             Some(r) => r,
             None => continue,
         };
-        
+
         // Resolve authorizer from route's authorizer_id ref
         let authorizer = route.authorizer_ref.as_ref().and_then(|ref_str| {
             let auth_name = extract_resource_name_from_ref(ref_str);
-            authorizers.iter().find(|a| a.resource_name == auth_name).and_then(|a| {
-                let auth_type = match a.auth_type.as_str() {
-                    "REQUEST" => AuthorizerType::Lambda,
-                    "JWT" => return None, // JWT authorizers don't need Lambda execution
-                    _ => AuthorizerType::Lambda,
-                };
-                let function_resource = a.lambda_uri_ref.as_ref().map(|uri| extract_lambda_name_from_ref(uri));
-                Some(AuthorizerConfig { auth_type, function_resource })
-            })
+            authorizers
+                .iter()
+                .find(|a| a.resource_name == auth_name)
+                .and_then(|a| {
+                    let auth_type = match a.auth_type.as_str() {
+                        "REQUEST" => AuthorizerType::Lambda,
+                        "JWT" => return None, // JWT authorizers don't need Lambda execution
+                        _ => AuthorizerType::Lambda,
+                    };
+                    let function_resource = a
+                        .lambda_uri_ref
+                        .as_ref()
+                        .map(|uri| extract_lambda_name_from_ref(uri));
+                    Some(AuthorizerConfig {
+                        auth_type,
+                        function_resource,
+                    })
+                })
         });
-        
+
         let route_config = RouteConfig {
             method,
             path,
             function_resource: lambda_resource.clone(),
             authorizer,
         };
-        
+
         // Find the matching v2 gateway
         let api_resource_name = extract_resource_name_from_ref(&route.api_ref);
         let gateway = config.gateways.iter_mut().find(|g| {
-            g.resource_name == api_resource_name && (g.api_type == ApiType::Http || g.api_type == ApiType::WebSocket)
+            g.resource_name == api_resource_name
+                && (g.api_type == ApiType::Http || g.api_type == ApiType::WebSocket)
         });
-        
+
         if let Some(gateway) = gateway {
-            tracing::info!("Resolved v2 route: {} {} → {}",
-                route_config.method_str(), route_config.path, lambda_resource);
+            tracing::info!(
+                "Resolved v2 route: {} {} → {}",
+                route_config.method_str(),
+                route_config.path,
+                lambda_resource
+            );
             gateway.routes.push(route_config);
         }
     }
@@ -733,13 +799,17 @@ fn parse_http_method(s: &str) -> HttpMethod {
 }
 
 /// Parse aws_lambda_function resource
-fn parse_lambda_function(name: &str, block: &hcl::Block, resolver: &VariableResolver) -> Result<Option<LambdaConfig>> {
+fn parse_lambda_function(
+    name: &str,
+    block: &hcl::Block,
+    resolver: &VariableResolver,
+) -> Result<Option<LambdaConfig>> {
     let body = &block.body;
-    
+
     // Extract required attributes (with variable resolution)
     let function_name = get_string_attr_resolved(body, "function_name", resolver)
         .unwrap_or_else(|| name.to_string());
-    
+
     let handler = match get_string_attr_resolved(body, "handler", resolver) {
         Some(h) => h,
         None => {
@@ -747,7 +817,7 @@ fn parse_lambda_function(name: &str, block: &hcl::Block, resolver: &VariableReso
             return Ok(None);
         }
     };
-    
+
     let runtime_str = match get_string_attr_resolved(body, "runtime", resolver) {
         Some(r) => r,
         None => {
@@ -755,27 +825,28 @@ fn parse_lambda_function(name: &str, block: &hcl::Block, resolver: &VariableReso
             return Ok(None);
         }
     };
-    
+
     // Extract optional attributes
     let timeout = get_number_attr(body, "timeout").unwrap_or(3);
     let memory_size = get_number_attr(body, "memory_size").unwrap_or(128);
-    
+
     // Extract environment variables (with variable resolution)
     let environment = extract_environment_resolved(body, resolver);
-    
+
     // Try to find source path
     let source_path = get_string_attr_resolved(body, "filename", resolver)
-        .or_else(|| get_string_attr(body, "source_code_hash").and_then(|_| {
-            get_string_attr_resolved(body, "filename", resolver)
-        }))
+        .or_else(|| {
+            get_string_attr(body, "source_code_hash")
+                .and_then(|_| get_string_attr_resolved(body, "filename", resolver))
+        })
         .map(std::path::PathBuf::from);
-    
+
     // Extract layer references (e.g., [aws_lambda_layer_version.utils.arn])
     let layers = get_list_traversal_attrs(body, "layers")
         .into_iter()
         .filter_map(|ref_str| extract_layer_resource_name(&ref_str))
         .collect();
-    
+
     Ok(Some(LambdaConfig {
         resource_name: name.to_string(),
         function_name,
@@ -790,19 +861,20 @@ fn parse_lambda_function(name: &str, block: &hcl::Block, resolver: &VariableReso
 }
 
 /// Parse aws_lambda_layer_version resource
-fn parse_lambda_layer(name: &str, block: &hcl::Block) -> Result<Option<crate::config::LayerConfig>> {
+fn parse_lambda_layer(
+    name: &str,
+    block: &hcl::Block,
+) -> Result<Option<crate::config::LayerConfig>> {
     let body = &block.body;
-    
-    let layer_name = get_string_attr(body, "layer_name")
-        .unwrap_or_else(|| name.to_string());
-    
+
+    let layer_name = get_string_attr(body, "layer_name").unwrap_or_else(|| name.to_string());
+
     // Source path from filename attribute
-    let source_path = get_string_attr(body, "filename")
-        .map(std::path::PathBuf::from);
-    
+    let source_path = get_string_attr(body, "filename").map(std::path::PathBuf::from);
+
     // Compatible runtimes
     let compatible_runtimes = get_list_string_attrs(body, "compatible_runtimes");
-    
+
     Ok(Some(crate::config::LayerConfig {
         resource_name: name.to_string(),
         layer_name,
@@ -812,21 +884,21 @@ fn parse_lambda_layer(name: &str, block: &hcl::Block) -> Result<Option<crate::co
 }
 
 /// Parse aws_sfn_state_machine resource
-fn parse_sfn_state_machine(name: &str, block: &hcl::Block) -> Result<Option<crate::config::StepFunctionConfig>> {
+fn parse_sfn_state_machine(
+    name: &str,
+    block: &hcl::Block,
+) -> Result<Option<crate::config::StepFunctionConfig>> {
     let body = &block.body;
-    
-    let machine_name = get_string_attr(body, "name")
-        .unwrap_or_else(|| name.to_string());
-    
-    let machine_type = get_string_attr(body, "type")
-        .unwrap_or_else(|| "STANDARD".to_string());
-    
+
+    let machine_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+
+    let machine_type = get_string_attr(body, "type").unwrap_or_else(|| "STANDARD".to_string());
+
     // Definition can be inline string or jsonencode()
-    let definition = get_string_attr(body, "definition")
-        .unwrap_or_else(|| "{}".to_string());
-    
+    let definition = get_string_attr(body, "definition").unwrap_or_else(|| "{}".to_string());
+
     let role_arn_ref = get_string_attr(body, "role_arn");
-    
+
     Ok(Some(crate::config::StepFunctionConfig {
         resource_name: name.to_string(),
         name: machine_name,
@@ -837,24 +909,25 @@ fn parse_sfn_state_machine(name: &str, block: &hcl::Block) -> Result<Option<crat
 }
 
 /// Parse aws_dynamodb_table resource
-fn parse_dynamodb_table(name: &str, block: &hcl::Block) -> Result<Option<crate::config::DynamoDbTableConfig>> {
+fn parse_dynamodb_table(
+    name: &str,
+    block: &hcl::Block,
+) -> Result<Option<crate::config::DynamoDbTableConfig>> {
     let body = &block.body;
-    
-    let table_name = get_string_attr(body, "name")
-        .unwrap_or_else(|| name.to_string());
-    
+
+    let table_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+
     let hash_key = get_string_attr(body, "hash_key");
     let range_key = get_string_attr(body, "range_key");
-    let billing_mode = get_string_attr(body, "billing_mode")
-        .unwrap_or_else(|| "PROVISIONED".to_string());
-    
-    let stream_enabled = get_bool_attr(body, "stream_enabled")
-        .unwrap_or(false);
-    
+    let billing_mode =
+        get_string_attr(body, "billing_mode").unwrap_or_else(|| "PROVISIONED".to_string());
+
+    let stream_enabled = get_bool_attr(body, "stream_enabled").unwrap_or(false);
+
     // Parse GSI and LSI names from nested blocks
     let mut gsi_names = Vec::new();
     let mut lsi_names = Vec::new();
-    
+
     for inner_block in body.blocks() {
         match inner_block.identifier.as_str() {
             "global_secondary_index" => {
@@ -870,7 +943,7 @@ fn parse_dynamodb_table(name: &str, block: &hcl::Block) -> Result<Option<crate::
             _ => {}
         }
     }
-    
+
     Ok(Some(crate::config::DynamoDbTableConfig {
         resource_name: name.to_string(),
         name: table_name,
@@ -884,15 +957,17 @@ fn parse_dynamodb_table(name: &str, block: &hcl::Block) -> Result<Option<crate::
 }
 
 /// Parse aws_sqs_queue resource
-fn parse_sqs_queue(name: &str, block: &hcl::Block) -> Result<Option<crate::config::SqsQueueConfig>> {
+fn parse_sqs_queue(
+    name: &str,
+    block: &hcl::Block,
+) -> Result<Option<crate::config::SqsQueueConfig>> {
     let body = &block.body;
-    
-    let queue_name = get_string_attr(body, "name")
-        .unwrap_or_else(|| name.to_string());
-    
+
+    let queue_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+
     let fifo_queue = get_bool_attr(body, "fifo_queue").unwrap_or(false);
     let visibility_timeout = get_number_attr(body, "visibility_timeout_seconds").unwrap_or(30);
-    
+
     Ok(Some(crate::config::SqsQueueConfig {
         resource_name: name.to_string(),
         name: queue_name,
@@ -902,14 +977,16 @@ fn parse_sqs_queue(name: &str, block: &hcl::Block) -> Result<Option<crate::confi
 }
 
 /// Parse aws_sns_topic resource
-fn parse_sns_topic(name: &str, block: &hcl::Block) -> Result<Option<crate::config::SnsTopicConfig>> {
+fn parse_sns_topic(
+    name: &str,
+    block: &hcl::Block,
+) -> Result<Option<crate::config::SnsTopicConfig>> {
     let body = &block.body;
-    
-    let topic_name = get_string_attr(body, "name")
-        .unwrap_or_else(|| name.to_string());
-    
+
+    let topic_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+
     let fifo_topic = get_bool_attr(body, "fifo_topic").unwrap_or(false);
-    
+
     Ok(Some(crate::config::SnsTopicConfig {
         resource_name: name.to_string(),
         name: topic_name,
@@ -918,33 +995,47 @@ fn parse_sns_topic(name: &str, block: &hcl::Block) -> Result<Option<crate::confi
 }
 
 /// Parse aws_lambda_event_source_mapping resource
-fn parse_event_source_mapping(name: &str, block: &hcl::Block) -> Result<Option<crate::config::EventSourceMappingConfig>> {
+fn parse_event_source_mapping(
+    name: &str,
+    block: &hcl::Block,
+) -> Result<Option<crate::config::EventSourceMappingConfig>> {
     let body = &block.body;
-    
+
     // event_source_arn is a traversal like aws_sqs_queue.my_queue.arn
-    let source_ref = get_traversal_attr(body, "event_source_arn")
-        .unwrap_or_default();
-    
+    let source_ref = get_traversal_attr(body, "event_source_arn").unwrap_or_default();
+
     // function_name is a traversal like aws_lambda_function.processor.arn
-    let function_ref = get_traversal_attr(body, "function_name")
-        .unwrap_or_default();
-    
+    let function_ref = get_traversal_attr(body, "function_name").unwrap_or_default();
+
     // Determine source type from the reference
     let (source_type, source_resource) = if source_ref.starts_with("aws_sqs_queue.") {
-        (crate::config::EventSourceType::Sqs, extract_resource_name_from_ref(&source_ref))
+        (
+            crate::config::EventSourceType::Sqs,
+            extract_resource_name_from_ref(&source_ref),
+        )
     } else if source_ref.starts_with("aws_dynamodb_table.") {
-        (crate::config::EventSourceType::DynamoDb, extract_resource_name_from_ref(&source_ref))
+        (
+            crate::config::EventSourceType::DynamoDb,
+            extract_resource_name_from_ref(&source_ref),
+        )
     } else if source_ref.starts_with("aws_kinesis_stream.") {
-        (crate::config::EventSourceType::Kinesis, extract_resource_name_from_ref(&source_ref))
+        (
+            crate::config::EventSourceType::Kinesis,
+            extract_resource_name_from_ref(&source_ref),
+        )
     } else {
-        tracing::warn!("Event source mapping '{}': unrecognized source '{}'", name, source_ref);
+        tracing::warn!(
+            "Event source mapping '{}': unrecognized source '{}'",
+            name,
+            source_ref
+        );
         return Ok(None);
     };
-    
+
     let function_resource = extract_lambda_name_from_ref(&function_ref);
     let batch_size = get_number_attr(body, "batch_size").unwrap_or(10);
     let enabled = get_bool_attr(body, "enabled").unwrap_or(true);
-    
+
     Ok(Some(crate::config::EventSourceMappingConfig {
         resource_name: name.to_string(),
         source_type,
@@ -969,29 +1060,24 @@ fn extract_layer_resource_name(ref_str: &str) -> Option<String> {
 fn get_list_traversal_attrs(body: &hcl::Body, name: &str) -> Vec<String> {
     body.attributes()
         .find(|attr| attr.key.to_string() == name)
-        .map(|attr| {
-            match &attr.expr {
-                hcl::Expression::Array(items) => {
-                    items.iter().filter_map(|item| {
-                        match item {
-                            hcl::Expression::Traversal(traversal) => {
-                                let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
-                                    .chain(traversal.operators.iter().map(|op| {
-                                        match op {
-                                            hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
-                                            hcl::TraversalOperator::Index(expr) => format!("{}", expr),
-                                            _ => String::new(),
-                                        }
-                                    }))
-                                    .collect();
-                                Some(parts.join("."))
-                            }
-                            _ => None,
-                        }
-                    }).collect()
-                }
-                _ => Vec::new(),
-            }
+        .map(|attr| match &attr.expr {
+            hcl::Expression::Array(items) => items
+                .iter()
+                .filter_map(|item| match item {
+                    hcl::Expression::Traversal(traversal) => {
+                        let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                            .chain(traversal.operators.iter().map(|op| match op {
+                                hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                                hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                                _ => String::new(),
+                            }))
+                            .collect();
+                        Some(parts.join("."))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         })
         .unwrap_or_default()
 }
@@ -1000,18 +1086,15 @@ fn get_list_traversal_attrs(body: &hcl::Body, name: &str) -> Vec<String> {
 fn get_list_string_attrs(body: &hcl::Body, name: &str) -> Vec<String> {
     body.attributes()
         .find(|attr| attr.key.to_string() == name)
-        .map(|attr| {
-            match &attr.expr {
-                hcl::Expression::Array(items) => {
-                    items.iter().filter_map(|item| {
-                        match item {
-                            hcl::Expression::String(s) => Some(s.to_string()),
-                            _ => None,
-                        }
-                    }).collect()
-                }
-                _ => Vec::new(),
-            }
+        .map(|attr| match &attr.expr {
+            hcl::Expression::Array(items) => items
+                .iter()
+                .filter_map(|item| match item {
+                    hcl::Expression::String(s) => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         })
         .unwrap_or_default()
 }
@@ -1019,10 +1102,9 @@ fn get_list_string_attrs(body: &hcl::Body, name: &str) -> Vec<String> {
 /// Parse aws_api_gateway_rest_api resource
 fn parse_api_gateway_rest(name: &str, block: &hcl::Block) -> Result<Option<ApiGatewayConfig>> {
     let body = &block.body;
-    
-    let api_name = get_string_attr(body, "name")
-        .unwrap_or_else(|| name.to_string());
-    
+
+    let api_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+
     Ok(Some(ApiGatewayConfig {
         resource_name: name.to_string(),
         name: api_name,
@@ -1044,23 +1126,19 @@ fn label_to_string(label: &hcl::structure::BlockLabel) -> String {
 fn get_traversal_attr(body: &hcl::Body, name: &str) -> Option<String> {
     body.attributes()
         .find(|attr| attr.key.to_string() == name)
-        .and_then(|attr| {
-            match &attr.expr {
-                hcl::Expression::Traversal(traversal) => {
-                    let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
-                        .chain(traversal.operators.iter().map(|op| {
-                            match op {
-                                hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
-                                hcl::TraversalOperator::Index(expr) => format!("{}", expr),
-                                _ => String::new(),
-                            }
-                        }))
-                        .collect();
-                    Some(parts.join("."))
-                }
-                hcl::Expression::String(s) => Some(s.to_string()),
-                _ => None,
+        .and_then(|attr| match &attr.expr {
+            hcl::Expression::Traversal(traversal) => {
+                let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                    .chain(traversal.operators.iter().map(|op| match op {
+                        hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                        hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                        _ => String::new(),
+                    }))
+                    .collect();
+                Some(parts.join("."))
             }
+            hcl::Expression::String(s) => Some(s.to_string()),
+            _ => None,
         })
 }
 
@@ -1070,7 +1148,11 @@ fn get_string_attr(body: &hcl::Body, name: &str) -> Option<String> {
 }
 
 /// Get a string attribute from HCL body, resolving var.xxx references
-fn get_string_attr_resolved(body: &hcl::Body, name: &str, resolver: &VariableResolver) -> Option<String> {
+fn get_string_attr_resolved(
+    body: &hcl::Body,
+    name: &str,
+    resolver: &VariableResolver,
+) -> Option<String> {
     body.attributes()
         .find(|attr| attr.key.to_string() == name)
         .and_then(|attr| {
@@ -1078,25 +1160,23 @@ fn get_string_attr_resolved(body: &hcl::Body, name: &str, resolver: &VariableRes
                 hcl::Expression::String(s) => {
                     let resolved = resolver.resolve(s);
                     Some(resolved)
-                },
+                }
                 hcl::Expression::TemplateExpr(t) => {
                     let resolved = resolver.resolve(&t.to_string());
                     Some(resolved)
-                },
+                }
                 hcl::Expression::Traversal(traversal) => {
                     // Handle bare var.xxx references
                     let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
-                        .chain(traversal.operators.iter().map(|op| {
-                            match op {
-                                hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
-                                hcl::TraversalOperator::Index(expr) => format!("{}", expr),
-                                _ => String::new(),
-                            }
+                        .chain(traversal.operators.iter().map(|op| match op {
+                            hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                            hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                            _ => String::new(),
                         }))
                         .collect();
                     let traversal_str = parts.join(".");
                     resolver.resolve_traversal(&traversal_str)
-                },
+                }
                 _ => None,
             }
         })
@@ -1106,12 +1186,10 @@ fn get_string_attr_resolved(body: &hcl::Body, name: &str, resolver: &VariableRes
 fn get_bool_attr(body: &hcl::Body, name: &str) -> Option<bool> {
     body.attributes()
         .find(|attr| attr.key.to_string() == name)
-        .and_then(|attr| {
-            match &attr.expr {
-                hcl::Expression::Bool(b) => Some(*b),
-                hcl::Expression::String(s) => Some(s == "true"),
-                _ => None,
-            }
+        .and_then(|attr| match &attr.expr {
+            hcl::Expression::Bool(b) => Some(*b),
+            hcl::Expression::String(s) => Some(s == "true"),
+            _ => None,
         })
 }
 
@@ -1119,18 +1197,19 @@ fn get_bool_attr(body: &hcl::Body, name: &str) -> Option<bool> {
 fn get_number_attr(body: &hcl::Body, name: &str) -> Option<u32> {
     body.attributes()
         .find(|attr| attr.key.to_string() == name)
-        .and_then(|attr| {
-            match &attr.expr {
-                hcl::Expression::Number(n) => n.as_u64().map(|v| v as u32),
-                _ => None,
-            }
+        .and_then(|attr| match &attr.expr {
+            hcl::Expression::Number(n) => n.as_u64().map(|v| v as u32),
+            _ => None,
         })
 }
 
 /// Extract environment variables from Lambda resource with variable resolution
-fn extract_environment_resolved(body: &hcl::Body, resolver: &VariableResolver) -> HashMap<String, String> {
+fn extract_environment_resolved(
+    body: &hcl::Body,
+    resolver: &VariableResolver,
+) -> HashMap<String, String> {
     let mut env = HashMap::new();
-    
+
     for block in body.blocks() {
         let identifier = block.identifier.to_string();
         if identifier == "environment" {
@@ -1141,20 +1220,27 @@ fn extract_environment_resolved(body: &hcl::Body, resolver: &VariableResolver) -
                             if let hcl::ObjectKey::Identifier(k) = key {
                                 let resolved_value = match value {
                                     hcl::Expression::String(v) => Some(resolver.resolve(v)),
-                                    hcl::Expression::TemplateExpr(t) => Some(resolver.resolve(&t.to_string())),
+                                    hcl::Expression::TemplateExpr(t) => {
+                                        Some(resolver.resolve(&t.to_string()))
+                                    }
                                     hcl::Expression::Traversal(traversal) => {
-                                        let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
-                                            .chain(traversal.operators.iter().map(|op| {
-                                                match op {
-                                                    hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
-                                                    hcl::TraversalOperator::Index(expr) => format!("{}", expr),
-                                                    _ => String::new(),
-                                                }
-                                            }))
-                                            .collect();
+                                        let parts: Vec<String> =
+                                            std::iter::once(traversal.expr.to_string())
+                                                .chain(traversal.operators.iter().map(
+                                                    |op| match op {
+                                                        hcl::TraversalOperator::GetAttr(ident) => {
+                                                            ident.to_string()
+                                                        }
+                                                        hcl::TraversalOperator::Index(expr) => {
+                                                            format!("{}", expr)
+                                                        }
+                                                        _ => String::new(),
+                                                    },
+                                                ))
+                                                .collect();
                                         let traversal_str = parts.join(".");
                                         resolver.resolve_traversal(&traversal_str)
-                                    },
+                                    }
                                     _ => None,
                                 };
                                 if let Some(val) = resolved_value {
@@ -1167,7 +1253,7 @@ fn extract_environment_resolved(body: &hcl::Body, resolver: &VariableResolver) -
             }
         }
     }
-    
+
     env
 }
 
@@ -1175,7 +1261,7 @@ fn extract_environment_resolved(body: &hcl::Body, resolver: &VariableResolver) -
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     #[test]
     fn test_parse_simple_lambda() {
         let tf_content = r#"
@@ -1194,13 +1280,13 @@ resource "aws_lambda_function" "api_handler" {
   }
 }
 "#;
-        
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("main.tf");
         fs::write(&file_path, tf_content).unwrap();
-        
+
         let config = parse_terraform_dir(dir.path()).unwrap();
-        
+
         assert_eq!(config.functions.len(), 1);
         let lambda = &config.functions[0];
         assert_eq!(lambda.function_name, "my-api-handler");
@@ -1208,9 +1294,12 @@ resource "aws_lambda_function" "api_handler" {
         assert_eq!(lambda.runtime, Runtime::Nodejs20);
         assert_eq!(lambda.timeout, 30);
         assert_eq!(lambda.memory_size, 256);
-        assert_eq!(lambda.environment.get("TABLE_NAME"), Some(&"my-table".to_string()));
+        assert_eq!(
+            lambda.environment.get("TABLE_NAME"),
+            Some(&"my-table".to_string())
+        );
     }
-    
+
     #[test]
     fn test_parse_http_api_v2() {
         let tf_content = r#"
@@ -1243,34 +1332,34 @@ resource "aws_apigatewayv2_route" "default" {
   target    = aws_apigatewayv2_integration.hello.id
 }
 "#;
-        
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("main.tf");
         fs::write(&file_path, tf_content).unwrap();
-        
+
         let config = parse_terraform_dir(dir.path()).unwrap();
-        
+
         assert_eq!(config.functions.len(), 1);
         assert_eq!(config.gateways.len(), 1);
-        
+
         let gw = &config.gateways[0];
         assert_eq!(gw.name, "my-http-api");
         assert_eq!(gw.api_type, ApiType::Http);
         assert_eq!(gw.routes.len(), 2);
-        
+
         // GET /hello
         let r1 = &gw.routes[0];
         assert_eq!(r1.method, HttpMethod::Get);
         assert_eq!(r1.path, "/hello");
         assert_eq!(r1.function_resource, "hello");
-        
+
         // $default → ANY /
         let r2 = &gw.routes[1];
         assert_eq!(r2.method, HttpMethod::Any);
         assert_eq!(r2.path, "/");
         assert_eq!(r2.function_resource, "hello");
     }
-    
+
     #[test]
     fn test_parse_authorizer_v1() {
         let tf_content = r#"
@@ -1319,30 +1408,33 @@ resource "aws_api_gateway_integration" "protected" {
   uri         = aws_lambda_function.protected.invoke_arn
 }
 "#;
-        
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("main.tf");
         fs::write(&file_path, tf_content).unwrap();
-        
+
         let config = parse_terraform_dir(dir.path()).unwrap();
-        
+
         assert_eq!(config.functions.len(), 2);
         assert_eq!(config.gateways.len(), 1);
-        
+
         let gw = &config.gateways[0];
         assert_eq!(gw.routes.len(), 1);
-        
+
         let route = &gw.routes[0];
         assert_eq!(route.method, HttpMethod::Get);
         assert_eq!(route.path, "/protected");
         assert_eq!(route.function_resource, "protected");
-        
+
         // Should have authorizer attached
-        let auth = route.authorizer.as_ref().expect("Route should have authorizer");
+        let auth = route
+            .authorizer
+            .as_ref()
+            .expect("Route should have authorizer");
         assert_eq!(auth.auth_type, AuthorizerType::Lambda);
         assert_eq!(auth.function_resource, Some("authorizer".to_string()));
     }
-    
+
     #[test]
     fn test_parse_lambda_layers() {
         let tf_content = r#"
@@ -1370,32 +1462,35 @@ resource "aws_lambda_function" "app" {
   ]
 }
 "#;
-        
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("main.tf");
         fs::write(&file_path, tf_content).unwrap();
-        
+
         let config = parse_terraform_dir(dir.path()).unwrap();
-        
+
         // Should parse 2 layers
         assert_eq!(config.layers.len(), 2);
-        
+
         let utils = &config.layers[0];
         assert_eq!(utils.resource_name, "utils");
         assert_eq!(utils.layer_name, "utils-layer");
-        assert_eq!(utils.source_path, Some(std::path::PathBuf::from("layers/utils")));
+        assert_eq!(
+            utils.source_path,
+            Some(std::path::PathBuf::from("layers/utils"))
+        );
         assert_eq!(utils.compatible_runtimes, vec!["nodejs20.x", "nodejs18.x"]);
-        
+
         let common = &config.layers[1];
         assert_eq!(common.resource_name, "common");
         assert_eq!(common.layer_name, "common-layer");
-        
+
         // Function should reference both layers
         assert_eq!(config.functions.len(), 1);
         let func = &config.functions[0];
         assert_eq!(func.layers, vec!["utils", "common"]);
     }
-    
+
     #[test]
     fn test_parse_dynamodb_tables() {
         let tf_content = r#"
@@ -1447,14 +1542,14 @@ resource "aws_dynamodb_table" "sessions" {
   }
 }
 "#;
-        
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("main.tf");
         fs::write(&file_path, tf_content).unwrap();
-        
+
         let config = parse_terraform_dir(dir.path()).unwrap();
         assert_eq!(config.dynamodb_tables.len(), 2);
-        
+
         let users = &config.dynamodb_tables[0];
         assert_eq!(users.name, "users-table");
         assert_eq!(users.hash_key, Some("userId".to_string()));
@@ -1463,7 +1558,7 @@ resource "aws_dynamodb_table" "sessions" {
         assert_eq!(users.gsi_names, vec!["email-index"]);
         assert_eq!(users.lsi_names, vec!["sort-by-date"]);
         assert!(users.stream_enabled);
-        
+
         let sessions = &config.dynamodb_tables[1];
         assert_eq!(sessions.name, "sessions-table");
         assert_eq!(sessions.hash_key, Some("sessionId".to_string()));
@@ -1471,7 +1566,7 @@ resource "aws_dynamodb_table" "sessions" {
         assert!(sessions.gsi_names.is_empty());
         assert!(!sessions.stream_enabled);
     }
-    
+
     #[test]
     fn test_nested_apigw_v1_resources() {
         let tf_content = r#"
@@ -1539,32 +1634,32 @@ resource "aws_api_gateway_integration" "list_users" {
   uri         = aws_lambda_function.users.invoke_arn
 }
 "#;
-        
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("main.tf");
         fs::write(&file_path, tf_content).unwrap();
-        
+
         let config = parse_terraform_dir(dir.path()).unwrap();
-        
+
         assert_eq!(config.gateways.len(), 1);
         let gw = &config.gateways[0];
         assert_eq!(gw.routes.len(), 2);
-        
+
         // Sort routes by path for deterministic assertions
         let mut routes: Vec<_> = gw.routes.iter().collect();
         routes.sort_by_key(|r| r.path.clone());
-        
+
         // GET /api/v1/users
         assert_eq!(routes[0].path, "/api/v1/users");
         assert_eq!(routes[0].method, HttpMethod::Get);
         assert_eq!(routes[0].function_resource, "users");
-        
+
         // GET /api/v1/users/{id}
         assert_eq!(routes[1].path, "/api/v1/users/{id}");
         assert_eq!(routes[1].method, HttpMethod::Get);
         assert_eq!(routes[1].function_resource, "users");
     }
-    
+
     #[test]
     fn test_opentofu_compatibility() {
         // OpenTofu uses identical HCL syntax with its own registry and features
@@ -1694,46 +1789,70 @@ resource "aws_lambda_event_source_mapping" "sqs_worker" {
   enabled          = true
 }
 "#;
-        
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("main.tf");
         fs::write(&file_path, tf_content).unwrap();
-        
+
         let config = parse_terraform_dir(dir.path()).unwrap();
-        
+
         // Should parse all resources despite OpenTofu-specific blocks
         assert_eq!(config.functions.len(), 2, "Should find 2 Lambda functions");
         assert_eq!(config.gateways.len(), 2, "Should find REST + HTTP gateways");
-        assert_eq!(config.dynamodb_tables.len(), 1, "Should find DynamoDB table");
+        assert_eq!(
+            config.dynamodb_tables.len(),
+            1,
+            "Should find DynamoDB table"
+        );
         assert_eq!(config.sqs_queues.len(), 1, "Should find SQS queue");
-        assert_eq!(config.event_source_mappings.len(), 1, "Should find event source mapping");
-        
+        assert_eq!(
+            config.event_source_mappings.len(),
+            1,
+            "Should find event source mapping"
+        );
+
         // Verify Lambda parsing
-        let api = config.functions.iter().find(|f| f.resource_name == "api").unwrap();
+        let api = config
+            .functions
+            .iter()
+            .find(|f| f.resource_name == "api")
+            .unwrap();
         assert_eq!(api.function_name, "tofu-api");
         assert_eq!(api.runtime, Runtime::Nodejs20);
         assert_eq!(api.environment.get("ENV"), Some(&"dev".to_string()));
-        
-        let worker = config.functions.iter().find(|f| f.resource_name == "worker").unwrap();
+
+        let worker = config
+            .functions
+            .iter()
+            .find(|f| f.resource_name == "worker")
+            .unwrap();
         assert_eq!(worker.function_name, "tofu-worker");
         assert_eq!(worker.runtime, Runtime::Python312);
-        
+
         // Verify REST API routes
-        let rest_gw = config.gateways.iter().find(|g| g.api_type == ApiType::Rest).unwrap();
+        let rest_gw = config
+            .gateways
+            .iter()
+            .find(|g| g.api_type == ApiType::Rest)
+            .unwrap();
         assert_eq!(rest_gw.routes.len(), 1);
         assert_eq!(rest_gw.routes[0].path, "/items");
         assert_eq!(rest_gw.routes[0].method, HttpMethod::Get);
-        
+
         // Verify HTTP API routes
-        let http_gw = config.gateways.iter().find(|g| g.api_type == ApiType::Http).unwrap();
+        let http_gw = config
+            .gateways
+            .iter()
+            .find(|g| g.api_type == ApiType::Http)
+            .unwrap();
         assert_eq!(http_gw.routes.len(), 1);
         assert_eq!(http_gw.routes[0].path, "/process");
         assert_eq!(http_gw.routes[0].method, HttpMethod::Post);
-        
+
         // Verify DynamoDB
         assert_eq!(config.dynamodb_tables[0].name, "tofu-data");
         assert!(config.dynamodb_tables[0].stream_enabled);
-        
+
         // Verify SQS → Lambda mapping
         let esm = &config.event_source_mappings[0];
         assert_eq!(esm.source_resource, "tasks");
@@ -1780,7 +1899,10 @@ resource "aws_lambda_function" "api" {
         assert_eq!(func.function_name, "myapp-dev-api");
         assert_eq!(func.environment.get("PROJECT"), Some(&"myapp".to_string()));
         assert_eq!(func.environment.get("ENV"), Some(&"dev".to_string()));
-        assert_eq!(func.environment.get("MIXED"), Some(&"myapp-service".to_string()));
+        assert_eq!(
+            func.environment.get("MIXED"),
+            Some(&"myapp-service".to_string())
+        );
     }
 
     #[test]
@@ -1823,7 +1945,10 @@ region  = "us-west-2"
         let func = &config.functions[0];
         // tfvars should override variable defaults
         assert_eq!(func.function_name, "overridden-name");
-        assert_eq!(func.environment.get("REGION"), Some(&"us-west-2".to_string()));
+        assert_eq!(
+            func.environment.get("REGION"),
+            Some(&"us-west-2".to_string())
+        );
     }
 
     #[test]
@@ -1843,7 +1968,11 @@ resource "aws_lambda_function" "api" {
 
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("main.tf"), tf_content).unwrap();
-        fs::write(dir.path().join("terraform.tfvars"), "stage = \"from-tfvars\"\n").unwrap();
+        fs::write(
+            dir.path().join("terraform.tfvars"),
+            "stage = \"from-tfvars\"\n",
+        )
+        .unwrap();
         fs::write(dir.path().join("prod.auto.tfvars"), "stage = \"prod\"\n").unwrap();
 
         let config = parse_terraform_dir(dir.path()).unwrap();

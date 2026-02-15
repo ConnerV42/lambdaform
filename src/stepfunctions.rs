@@ -91,7 +91,7 @@ pub struct Retrier {
 /// Render a state machine definition as an ASCII flow diagram
 pub fn render_ascii(name: &str, machine_type: &str, definition_json: &str) -> String {
     let mut output = String::new();
-    
+
     let def: StateMachineDefinition = match serde_json::from_str(definition_json) {
         Ok(d) => d,
         Err(e) => {
@@ -103,9 +103,13 @@ pub fn render_ascii(name: &str, machine_type: &str, definition_json: &str) -> St
             return output;
         }
     };
-    
+
     // Header
-    let type_icon = if machine_type == "EXPRESS" { "⚡" } else { "🔄" };
+    let type_icon = if machine_type == "EXPRESS" {
+        "⚡"
+    } else {
+        "🔄"
+    };
     output.push_str(&format!("{} {} ({})\n", type_icon, name, machine_type));
     if let Some(ref comment) = def.comment {
         output.push_str(&format!("   {}\n", comment));
@@ -114,26 +118,26 @@ pub fn render_ascii(name: &str, machine_type: &str, definition_json: &str) -> St
         output.push_str(&format!("   Timeout: {}s\n", timeout));
     }
     output.push('\n');
-    
+
     // Walk the state machine
     render_flow(&def, &mut output, 0);
-    
+
     output
 }
 
 fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize) {
     let pad = "   ".repeat(indent);
-    
+
     // Start
     output.push_str(&format!("{}  ┌─────────┐\n", pad));
     output.push_str(&format!("{}  │  START  │\n", pad));
     output.push_str(&format!("{}  └────┬────┘\n", pad));
     output.push_str(&format!("{}       │\n", pad));
-    
+
     // Walk states in order starting from start_at
     let mut current = Some(def.start_at.clone());
     let mut visited = Vec::new();
-    
+
     while let Some(state_name) = current {
         if visited.contains(&state_name) {
             output.push_str(&format!("{}       │\n", pad));
@@ -141,10 +145,10 @@ fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize)
             break;
         }
         visited.push(state_name.clone());
-        
+
         if let Some(state) = def.states.get(&state_name) {
             render_state(&state_name, state, output, &pad);
-            
+
             // Handle transitions
             match state.state_type.as_str() {
                 "Choice" => {
@@ -153,7 +157,13 @@ fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize)
                         for (i, choice) in choices.iter().enumerate() {
                             if let Some(ref next) = choice.next {
                                 let var_hint = choice.variable.as_deref().unwrap_or("condition");
-                                output.push_str(&format!("{}       ├── {} #{}: → {}\n", pad, var_hint, i + 1, next));
+                                output.push_str(&format!(
+                                    "{}       ├── {} #{}: → {}\n",
+                                    pad,
+                                    var_hint,
+                                    i + 1,
+                                    next
+                                ));
                             }
                         }
                     }
@@ -162,7 +172,7 @@ fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize)
                     }
                     // Can't follow linear path through Choice — show all targets
                     current = None;
-                    
+
                     // Render reachable states not yet visited
                     let mut targets: Vec<String> = Vec::new();
                     if let Some(ref choices) = state.choices {
@@ -179,13 +189,14 @@ fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize)
                             targets.push(d.clone());
                         }
                     }
-                    
+
                     for target in targets {
                         output.push_str(&format!("\n{}  ── Branch: {} ──\n", pad, target));
                         let mut branch_current = Some(target);
                         while let Some(ref bn) = branch_current {
                             if visited.contains(bn) {
-                                output.push_str(&format!("{}       → {} (already shown)\n", pad, bn));
+                                output
+                                    .push_str(&format!("{}       → {} (already shown)\n", pad, bn));
                                 break;
                             }
                             visited.push(bn.clone());
@@ -208,7 +219,11 @@ fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize)
                 "Parallel" => {
                     if let Some(ref branches) = state.branches {
                         for (i, branch) in branches.iter().enumerate() {
-                            output.push_str(&format!("\n{}  ── Parallel Branch {} ──\n", pad, i + 1));
+                            output.push_str(&format!(
+                                "\n{}  ── Parallel Branch {} ──\n",
+                                pad,
+                                i + 1
+                            ));
                             render_flow(branch, output, indent + 2);
                         }
                         output.push_str(&format!("\n{}  ── End Parallel ──\n", pad));
@@ -239,7 +254,7 @@ fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize)
                     }
                 }
             }
-            
+
             // Show end if terminal
             if state.end.unwrap_or(false) && state.state_type != "Choice" {
                 output.push_str(&format!("{}  ┌─────────┐\n", pad));
@@ -249,7 +264,10 @@ fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize)
                 output.push_str(&format!("{}       │\n", pad));
             }
         } else {
-            output.push_str(&format!("{}  ⚠️  State '{}' not found in definition\n", pad, state_name));
+            output.push_str(&format!(
+                "{}  ⚠️  State '{}' not found in definition\n",
+                pad, state_name
+            ));
             current = None;
         }
     }
@@ -267,15 +285,15 @@ fn render_state(name: &str, state: &State, output: &mut String, pad: &str) {
         "Fail" => "❌",
         _ => "?",
     };
-    
+
     // Build the box
     let label = format!("{} {} [{}]", icon, name, state.state_type);
     let width = label.len().max(20);
     let border = "─".repeat(width + 2);
-    
+
     output.push_str(&format!("{}  ┌{}┐\n", pad, border));
     output.push_str(&format!("{}  │ {:<width$} │\n", pad, label, width = width));
-    
+
     // Add details
     if let Some(ref resource) = state.resource {
         // Shorten ARN-like refs
@@ -284,55 +302,80 @@ fn render_state(name: &str, state: &State, output: &mut String, pad: &str) {
         } else {
             resource
         };
-        output.push_str(&format!("{}  │ {:<width$} │\n", pad, format!("  → {}", short), width = width));
+        output.push_str(&format!(
+            "{}  │ {:<width$} │\n",
+            pad,
+            format!("  → {}", short),
+            width = width
+        ));
     }
     if let Some(secs) = state.seconds {
-        output.push_str(&format!("{}  │ {:<width$} │\n", pad, format!("  {}s wait", secs), width = width));
+        output.push_str(&format!(
+            "{}  │ {:<width$} │\n",
+            pad,
+            format!("  {}s wait", secs),
+            width = width
+        ));
     }
     if let Some(ref catch) = state.catch {
         for c in catch {
             let errors = c.error_equals.join(", ");
             let next = c.next.as_deref().unwrap_or("?");
-            output.push_str(&format!("{}  │ {:<width$} │\n", pad, format!("  catch [{}] → {}", errors, next), width = width));
+            output.push_str(&format!(
+                "{}  │ {:<width$} │\n",
+                pad,
+                format!("  catch [{}] → {}", errors, next),
+                width = width
+            ));
         }
     }
     if let Some(ref retry) = state.retry {
         for r in retry {
             let errors = r.error_equals.join(", ");
             let attempts = r.max_attempts.unwrap_or(3);
-            output.push_str(&format!("{}  │ {:<width$} │\n", pad, format!("  retry [{}] ×{}", errors, attempts), width = width));
+            output.push_str(&format!(
+                "{}  │ {:<width$} │\n",
+                pad,
+                format!("  retry [{}] ×{}", errors, attempts),
+                width = width
+            ));
         }
     }
     if let Some(ref comment) = state.comment {
         let short: String = comment.chars().take(width - 2).collect();
-        output.push_str(&format!("{}  │ {:<width$} │\n", pad, format!("  # {}", short), width = width));
+        output.push_str(&format!(
+            "{}  │ {:<width$} │\n",
+            pad,
+            format!("  # {}", short),
+            width = width
+        ));
     }
-    
+
     output.push_str(&format!("{}  └{}┘\n", pad, border));
 }
 
 /// Generate a summary of state machine statistics
 pub fn summarize(definition_json: &str) -> Option<String> {
     let def: StateMachineDefinition = serde_json::from_str(definition_json).ok()?;
-    
+
     let total = def.states.len();
     let mut type_counts: HashMap<String, usize> = HashMap::new();
     for state in def.states.values() {
         *type_counts.entry(state.state_type.clone()).or_insert(0) += 1;
     }
-    
+
     let mut parts = vec![format!("{} states", total)];
     for (t, count) in &type_counts {
         parts.push(format!("{} {}", count, t));
     }
-    
+
     Some(parts.join(", "))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     const SIMPLE_ASL: &str = r#"{
         "Comment": "A simple order workflow",
         "StartAt": "ValidateOrder",
@@ -392,7 +435,7 @@ mod tests {
             }
         }
     }"#;
-    
+
     #[test]
     fn test_parse_simple_asl() {
         let def: StateMachineDefinition = serde_json::from_str(SIMPLE_ASL).unwrap();
@@ -401,7 +444,7 @@ mod tests {
         assert_eq!(def.states["ValidateOrder"].state_type, "Task");
         assert_eq!(def.states["IsInStock"].state_type, "Choice");
     }
-    
+
     #[test]
     fn test_render_ascii_simple() {
         let output = render_ascii("order-workflow", "STANDARD", SIMPLE_ASL);
@@ -414,13 +457,13 @@ mod tests {
         assert!(output.contains("ProcessPayment"));
         assert!(output.contains("END"));
     }
-    
+
     #[test]
     fn test_render_ascii_invalid_json() {
         let output = render_ascii("broken", "STANDARD", "not json");
         assert!(output.contains("Could not parse"));
     }
-    
+
     #[test]
     fn test_summarize() {
         let summary = summarize(SIMPLE_ASL).unwrap();
@@ -429,7 +472,7 @@ mod tests {
         assert!(summary.contains("Choice"));
         assert!(summary.contains("Fail"));
     }
-    
+
     #[test]
     fn test_parallel_state() {
         let asl = r#"{
@@ -462,7 +505,7 @@ mod tests {
         assert!(output.contains("BranchB"));
         assert!(output.contains("⚡")); // EXPRESS icon
     }
-    
+
     #[test]
     fn test_wait_state() {
         let asl = r#"{
