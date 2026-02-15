@@ -1360,4 +1360,180 @@ resource "aws_api_gateway_integration" "list_users" {
         assert_eq!(routes[1].method, HttpMethod::Get);
         assert_eq!(routes[1].function_resource, "users");
     }
+    
+    #[test]
+    fn test_opentofu_compatibility() {
+        // OpenTofu uses identical HCL syntax with its own registry and features
+        // like state encryption blocks. Lambdaform should parse these files fine.
+        let tf_content = r#"
+terraform {
+  required_version = ">= 1.6.0"
+
+  required_providers {
+    aws = {
+      source  = "registry.opentofu.org/hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+
+  # OpenTofu-specific: state encryption
+  encryption {
+    key_provider "pbkdf2" "my_key" {
+      passphrase = "test"
+    }
+    method "aes_gcm" "my_method" {
+      keys = key_provider.pbkdf2.my_key
+    }
+    state {
+      method   = method.aes_gcm.my_method
+      enforced = false
+    }
+  }
+}
+
+variable "prefix" {
+  type    = string
+  default = "tofu"
+}
+
+locals {
+  env = "dev"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "tofu-api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  timeout       = 30
+  memory_size   = 256
+  filename      = "api.zip"
+
+  environment {
+    variables = {
+      ENV = "dev"
+    }
+  }
+}
+
+resource "aws_lambda_function" "worker" {
+  function_name = "tofu-worker"
+  handler       = "main.handler"
+  runtime       = "python3.12"
+  timeout       = 60
+  filename      = "worker.zip"
+}
+
+resource "aws_api_gateway_rest_api" "api" {
+  name = "tofu-api"
+}
+
+resource "aws_api_gateway_resource" "items" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_rest_api.api.root_resource_id
+  path_part   = "items"
+}
+
+resource "aws_api_gateway_method" "get_items" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.items.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "get_items" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  resource_id = aws_api_gateway_resource.items.id
+  http_method = aws_api_gateway_method.get_items.http_method
+  type        = "AWS_PROXY"
+  uri         = aws_lambda_function.api.invoke_arn
+}
+
+resource "aws_apigatewayv2_api" "http" {
+  name          = "tofu-http"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_integration" "worker" {
+  api_id           = aws_apigatewayv2_api.http.id
+  integration_type = "AWS_PROXY"
+  integration_uri  = aws_lambda_function.worker.invoke_arn
+}
+
+resource "aws_apigatewayv2_route" "process" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "POST /process"
+  target    = aws_apigatewayv2_integration.worker.id
+}
+
+resource "aws_dynamodb_table" "data" {
+  name         = "tofu-data"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "id"
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+
+  stream_enabled = true
+}
+
+resource "aws_sqs_queue" "tasks" {
+  name                       = "tofu-tasks"
+  visibility_timeout_seconds = 60
+}
+
+resource "aws_lambda_event_source_mapping" "sqs_worker" {
+  event_source_arn = aws_sqs_queue.tasks.arn
+  function_name    = aws_lambda_function.worker.arn
+  batch_size       = 5
+  enabled          = true
+}
+"#;
+        
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+        
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        
+        // Should parse all resources despite OpenTofu-specific blocks
+        assert_eq!(config.functions.len(), 2, "Should find 2 Lambda functions");
+        assert_eq!(config.gateways.len(), 2, "Should find REST + HTTP gateways");
+        assert_eq!(config.dynamodb_tables.len(), 1, "Should find DynamoDB table");
+        assert_eq!(config.sqs_queues.len(), 1, "Should find SQS queue");
+        assert_eq!(config.event_source_mappings.len(), 1, "Should find event source mapping");
+        
+        // Verify Lambda parsing
+        let api = config.functions.iter().find(|f| f.resource_name == "api").unwrap();
+        assert_eq!(api.function_name, "tofu-api");
+        assert_eq!(api.runtime, Runtime::Nodejs20);
+        assert_eq!(api.environment.get("ENV"), Some(&"dev".to_string()));
+        
+        let worker = config.functions.iter().find(|f| f.resource_name == "worker").unwrap();
+        assert_eq!(worker.function_name, "tofu-worker");
+        assert_eq!(worker.runtime, Runtime::Python312);
+        
+        // Verify REST API routes
+        let rest_gw = config.gateways.iter().find(|g| g.api_type == ApiType::Rest).unwrap();
+        assert_eq!(rest_gw.routes.len(), 1);
+        assert_eq!(rest_gw.routes[0].path, "/items");
+        assert_eq!(rest_gw.routes[0].method, HttpMethod::Get);
+        
+        // Verify HTTP API routes
+        let http_gw = config.gateways.iter().find(|g| g.api_type == ApiType::Http).unwrap();
+        assert_eq!(http_gw.routes.len(), 1);
+        assert_eq!(http_gw.routes[0].path, "/process");
+        assert_eq!(http_gw.routes[0].method, HttpMethod::Post);
+        
+        // Verify DynamoDB
+        assert_eq!(config.dynamodb_tables[0].name, "tofu-data");
+        assert!(config.dynamodb_tables[0].stream_enabled);
+        
+        // Verify SQS → Lambda mapping
+        let esm = &config.event_source_mappings[0];
+        assert_eq!(esm.source_resource, "tasks");
+        assert_eq!(esm.function_resource, "worker");
+        assert_eq!(esm.batch_size, 5);
+    }
 }

@@ -31,6 +31,7 @@ If you use Terraform for Lambda infrastructure, your local development options a
 - 📨 **SQS/SNS triggers** — simulate event source mappings with proper event payloads
 - 🗄️ **DynamoDB hints** — table parsing with DynamoDB Local setup guidance
 - 📊 **Step Functions viz** — ASCII flow diagrams from `aws_sfn_state_machine` definitions
+- 🔄 **OpenTofu compatible** — works identically with OpenTofu and Terraform `.tf` files
 - 🆓 **Open source** — MIT license, no feature gating
 
 ## Quick Start
