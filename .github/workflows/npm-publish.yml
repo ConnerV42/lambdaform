@@ -1,0 +1,36 @@
+name: Publish npm Package
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Sync version from release tag
+        working-directory: npm
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "
+            const pkg = require('./package.json');
+            pkg.version = '$VERSION';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          # Also update VERSION in install.js (reads from package.json, so this is just validation)
+          echo "Publishing lambdaform@$VERSION"
+
+      - name: Publish to npm
+        working-directory: npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
