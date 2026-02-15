@@ -184,6 +184,14 @@ pub fn build_app(
         .with_state(state)
 }
 
+/// Create a future that resolves on Ctrl+C (SIGINT).
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install Ctrl+C handler");
+    tracing::info!("🛑 Received Ctrl+C — shutting down gracefully...");
+}
+
 pub async fn start_server(
     config: LambdaformConfig,
     source_dir: std::path::PathBuf,
@@ -191,13 +199,28 @@ pub async fn start_server(
     cors_config: Option<&CorsConfig>,
     debug: Option<DebugOptions>,
 ) -> anyhow::Result<()> {
-    let app = build_app(config, source_dir, cors_config, debug);
+    let state = Arc::new(AppState::new(config, source_dir, debug));
+    let pool = state.pool.clone();
+    let cors = build_cors_layer(cors_config);
+
+    let app = Router::new()
+        .route("/*path", any(handle_request))
+        .route("/", any(handle_request))
+        .layer(cors)
+        .with_state(state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     tracing::info!("Starting server on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Clean up worker processes
+    tracing::info!("Cleaning up worker processes...");
+    pool.invalidate_all().await;
+    tracing::info!("✅ Shutdown complete");
 
     Ok(())
 }
@@ -213,6 +236,10 @@ pub async fn start_multi_gateway(
 ) -> anyhow::Result<()> {
     let mut handles = Vec::new();
     let mut watch_handles = Vec::new();
+    let mut pools: Vec<Arc<ProcessPool>> = Vec::new();
+
+    // Shared shutdown notify
+    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
 
     for binding in &bindings {
         let gateway = config.gateways.iter()
@@ -225,6 +252,7 @@ pub async fn start_multi_gateway(
             source_dir.clone(),
             debug.clone(),
         ));
+        pools.push(state.pool.clone());
 
         if watch {
             let wh = start_watcher(source_dir.clone(), state.clone())?;
@@ -240,21 +268,38 @@ pub async fn start_multi_gateway(
 
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], binding.port));
         let gw_name = binding.gateway_name.clone();
+        let mut shutdown_rx = shutdown_tx.subscribe();
 
         let handle = tokio::spawn(async move {
             let listener = tokio::net::TcpListener::bind(addr).await
                 .map_err(|e| anyhow::anyhow!("Failed to bind {} on port {}: {}", gw_name, addr.port(), e))?;
             tracing::info!("🌐 {} listening on http://{}", gw_name, addr);
-            axum::serve(listener, app).await
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.changed().await;
+                })
+                .await
                 .map_err(|e| anyhow::anyhow!("Server error for {}: {}", gw_name, e))
         });
 
         handles.push(handle);
     }
 
-    // Wait for any server to finish (or error out)
-    let (result, _, _) = futures::future::select_all(handles).await;
-    result??;
+    // Wait for Ctrl+C, then signal all servers to stop
+    shutdown_signal().await;
+    let _ = shutdown_tx.send(true);
+
+    // Wait for all servers to finish
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    // Clean up all worker pools
+    tracing::info!("Cleaning up worker processes...");
+    for pool in &pools {
+        pool.invalidate_all().await;
+    }
+    tracing::info!("✅ Shutdown complete");
 
     Ok(())
 }
@@ -268,6 +313,7 @@ pub async fn start_server_with_watch(
     debug: Option<DebugOptions>,
 ) -> anyhow::Result<()> {
     let state = Arc::new(AppState::new(config, source_dir.clone(), debug));
+    let pool = state.pool.clone();
     let cors = build_cors_layer(cors_config);
 
     // Start file watcher (hold handle to keep it alive)
@@ -285,7 +331,14 @@ pub async fn start_server_with_watch(
     tracing::info!("Starting server on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Clean up worker processes
+    tracing::info!("Cleaning up worker processes...");
+    pool.invalidate_all().await;
+    tracing::info!("✅ Shutdown complete");
 
     Ok(())
 }

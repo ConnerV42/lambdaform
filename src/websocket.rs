@@ -134,9 +134,25 @@ pub async fn start_websocket_server(
     let connections_port = port + 1000; // Use port+1000 for management API
     tokio::spawn(start_connections_api(connections_state, connections_port));
 
-    while let Ok((stream, peer_addr)) = listener.accept().await {
-        let state = state.clone();
-        tokio::spawn(handle_connection(state, stream, peer_addr));
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, peer_addr)) => {
+                        let state = state.clone();
+                        tokio::spawn(handle_connection(state, stream, peer_addr));
+                    }
+                    Err(e) => {
+                        tracing::error!("WebSocket accept error: {}", e);
+                        break;
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("🛑 WebSocket server shutting down...");
+                break;
+            }
+        }
     }
 
     Ok(())
