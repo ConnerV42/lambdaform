@@ -6,17 +6,17 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-mod config;
-mod parser;
-mod pool;
-mod project_config;
-mod router;
-mod runtime;
-mod server;
-mod watcher;
-mod stepfunctions;
-mod trigger;
-mod websocket;
+use lambdaform::config;
+use lambdaform::parser;
+use lambdaform::pool;
+use lambdaform::project_config;
+use lambdaform::router;
+use lambdaform::runtime;
+use lambdaform::server;
+use lambdaform::watcher;
+use lambdaform::stepfunctions;
+use lambdaform::trigger;
+use lambdaform::websocket;
 
 /// Terraform-native local Lambda emulator
 #[derive(Parser)]

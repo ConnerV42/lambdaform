@@ -167,6 +167,23 @@ fn build_cors_layer(cors_config: Option<&CorsConfig>) -> CorsLayer {
 }
 
 /// Start the HTTP server (single port, all gateways merged)
+/// Build the axum app without starting a listener (useful for testing)
+pub fn build_app(
+    config: LambdaformConfig,
+    source_dir: std::path::PathBuf,
+    cors_config: Option<&CorsConfig>,
+    debug: Option<DebugOptions>,
+) -> Router {
+    let state = Arc::new(AppState::new(config, source_dir, debug));
+    let cors = build_cors_layer(cors_config);
+
+    Router::new()
+        .route("/*path", any(handle_request))
+        .route("/", any(handle_request))
+        .layer(cors)
+        .with_state(state)
+}
+
 pub async fn start_server(
     config: LambdaformConfig,
     source_dir: std::path::PathBuf,
@@ -174,14 +191,7 @@ pub async fn start_server(
     cors_config: Option<&CorsConfig>,
     debug: Option<DebugOptions>,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(AppState::new(config, source_dir, debug));
-    let cors = build_cors_layer(cors_config);
-
-    let app = Router::new()
-        .route("/*path", any(handle_request))
-        .route("/", any(handle_request))
-        .layer(cors)
-        .with_state(state.clone());
+    let app = build_app(config, source_dir, cors_config, debug);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     tracing::info!("Starting server on http://{}", addr);

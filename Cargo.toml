@@ -54,6 +54,12 @@ walkdir = "2"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+http-body-util = "0.1"
+tower_05 = { package = "tower", version = "0.5", features = ["util"] }
+
+[lib]
+name = "lambdaform"
+path = "src/lib.rs"
 
 [[bin]]
 name = "lambdaform"
