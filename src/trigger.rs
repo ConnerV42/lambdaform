@@ -146,11 +146,11 @@ pub async fn execute_trigger(
     // Build the event
     let event_payload = match source_type {
         "sqs" => {
-            let q = queue_name.unwrap();
+            let q = queue_name.expect("queue_name required for sqs source type");
             build_sqs_event(&q.name, &messages, q.fifo_queue)
         }
         "sns" => {
-            let t = topic_name.unwrap();
+            let t = topic_name.expect("topic_name required for sns source type");
             build_sns_event(&t.name, &messages)
         }
         _ => unreachable!(),

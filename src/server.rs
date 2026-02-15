@@ -599,7 +599,7 @@ async fn handle_request(
                 }
             }
 
-            builder.body(response_body.into()).unwrap()
+            builder.body(response_body.into()).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
         }
         Err(e) => {
             let duration = request_start.elapsed();

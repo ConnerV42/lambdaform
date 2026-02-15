@@ -115,7 +115,7 @@ impl ProcessPool {
             workers.insert(key.clone(), worker);
         }
 
-        let worker = workers.get_mut(&key).unwrap();
+        let worker = workers.get_mut(&key).expect("Worker was just inserted");
         let resp = worker.invoke(&id, event, context).await;
 
         // If invoke failed, remove the worker so it gets respawned next time
@@ -242,8 +242,8 @@ rl.on('line', async (line) => {{
         .spawn()
         .context("Failed to spawn Node.js worker")?;
 
-    let stdin = child.stdin.take().unwrap();
-    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let stdin = child.stdin.take().context("Failed to capture worker stdin")?;
+    let stdout = BufReader::new(child.stdout.take().context("Failed to capture worker stdout")?);
 
     Ok(Worker { child, stdin, stdout })
 }
@@ -354,8 +354,8 @@ for line in sys.stdin:
         .spawn()
         .context("Failed to spawn Python worker")?;
 
-    let stdin = child.stdin.take().unwrap();
-    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let stdin = child.stdin.take().context("Failed to capture worker stdin")?;
+    let stdout = BufReader::new(child.stdout.take().context("Failed to capture worker stdout")?);
 
     Ok(Worker { child, stdin, stdout })
 }

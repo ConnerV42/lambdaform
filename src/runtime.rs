@@ -385,7 +385,7 @@ process.stdin.once('data', async (data) => {{
             .envs(&self.env_with_layers())
             .spawn().context("Failed to spawn Node.js process")?;
         
-        let mut stdin = child.stdin.take().unwrap();
+        let mut stdin = child.stdin.take().context("Failed to capture stdin")?;
         stdin.write_all(serde_json::to_string(payload)?.as_bytes()).await?;
         stdin.flush().await?;
         drop(stdin);
@@ -444,7 +444,7 @@ except Exception as e:
             .envs(&self.env_with_layers())
             .spawn().context("Failed to spawn Python process")?;
         
-        let mut stdin = child.stdin.take().unwrap();
+        let mut stdin = child.stdin.take().context("Failed to capture stdin")?;
         stdin.write_all(serde_json::to_string(payload)?.as_bytes()).await?;
         stdin.flush().await?;
         drop(stdin);
@@ -652,7 +652,7 @@ except Exception as e:
         if self.use_pool() {
             match &self.config.runtime {
                 Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
-                    let pool = self.pool.as_ref().unwrap();
+                    let pool = self.pool.as_ref().expect("Pool should be initialized when use_pool() is true");
                     let env = self.env_with_layers();
                     let result = pool.invoke(
                         &self.config.function_name,
@@ -706,7 +706,7 @@ except Exception as e:
         if self.use_pool() {
             match &self.config.runtime {
                 Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
-                    let pool = self.pool.as_ref().unwrap();
+                    let pool = self.pool.as_ref().expect("Pool should be initialized when use_pool() is true");
                     let env = self.env_with_layers();
                     let result = pool.invoke(
                         &self.config.function_name,
@@ -775,7 +775,7 @@ process.stdin.once('data', async (data) => {{
         let mut cmd = Command::new("node");
         
         if debug_enabled {
-            let debug_opts = self.debug.as_ref().unwrap();
+            let debug_opts = self.debug.as_ref().expect("Debug config should exist when debug_enabled is true");
             let flag = if debug_opts.break_on_start {
                 format!("--inspect-brk=0.0.0.0:{}", debug_opts.port)
             } else {
@@ -812,7 +812,7 @@ process.stdin.once('data', async (data) => {{
             .context("Failed to spawn Node.js process")?;
         
         // Send payload
-        let mut stdin = child.stdin.take().unwrap();
+        let mut stdin = child.stdin.take().context("Failed to capture stdin")?;
         stdin
             .write_all(serde_json::to_string(payload)?.as_bytes())
             .await?;
@@ -856,7 +856,7 @@ process.stdin.once('data', async (data) => {{
         let debug_enabled = self.debug.as_ref().map_or(false, |d| d.python);
         
         let debug_preamble = if debug_enabled {
-            let debug_opts = self.debug.as_ref().unwrap();
+            let debug_opts = self.debug.as_ref().expect("Debug config should exist when debug_enabled is true");
             let port = debug_opts.python_port;
             let wait = if debug_opts.break_on_start { "True" } else { "False" };
             tracing::info!("🐍 Python debugger (debugpy) listening on 0.0.0.0:{}", port);
@@ -924,7 +924,7 @@ except Exception as e:
             .spawn()
             .context("Failed to spawn Python process")?;
         
-        let mut stdin = child.stdin.take().unwrap();
+        let mut stdin = child.stdin.take().context("Failed to capture stdin")?;
         stdin
             .write_all(serde_json::to_string(payload)?.as_bytes())
             .await?;
@@ -1008,7 +1008,7 @@ fn uuid_simple() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap();
+        .unwrap_or_default();
     format!("{:x}-{:x}", duration.as_secs(), duration.subsec_nanos())
 }
 

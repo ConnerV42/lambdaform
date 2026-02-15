@@ -249,7 +249,7 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port
         if multi_gateway {
             println!("\n🌐 API Gateways ({}):", config.gateways.len());
             for binding in &gateway_bindings {
-                let gw = config.gateways.iter().find(|g| g.resource_name == binding.gateway_resource).unwrap();
+                let gw = config.gateways.iter().find(|g| g.resource_name == binding.gateway_resource).expect("Gateway binding references non-existent gateway");
                 println!("   📡 {} ({:?}) → http://localhost:{}", gw.name, gw.api_type, binding.port);
                 for route in &gw.routes {
                     println!("      {:?} {} → {}", route.method, route.path, route.function_resource);
