@@ -62,6 +62,10 @@ enum Commands {
         /// Python debugger port (default: 5678)
         #[arg(long, default_value = "5678")]
         debug_python_port: u16,
+
+        /// Additional .tfvars files to load (like terraform -var-file)
+        #[arg(long = "var-file", value_name = "FILE")]
+        var_files: Vec<PathBuf>,
     },
 
     /// Invoke a Lambda function directly
@@ -87,6 +91,10 @@ enum Commands {
         /// Directory containing Terraform files
         #[arg(short, long, default_value = ".")]
         dir: PathBuf,
+
+        /// Additional .tfvars files to load (like terraform -var-file)
+        #[arg(long = "var-file", value_name = "FILE")]
+        var_files: Vec<PathBuf>,
     },
 
     /// Validate Terraform files
@@ -94,6 +102,10 @@ enum Commands {
         /// Directory containing Terraform files
         #[arg(short, long, default_value = ".")]
         dir: PathBuf,
+
+        /// Additional .tfvars files to load (like terraform -var-file)
+        #[arg(long = "var-file", value_name = "FILE")]
+        var_files: Vec<PathBuf>,
     },
 
     /// Send a test message through SQS/SNS trigger to invoke a Lambda
@@ -154,9 +166,9 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Start { port, dir, watch, verbose: _, debug, debug_port, debug_python, debug_python_port } => {
+        Commands::Start { port, dir, watch, verbose: _, debug, debug_port, debug_python, debug_python_port, var_files } => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(cmd_start(port, dir, watch, debug, debug_port, debug_python, debug_python_port))
+            rt.block_on(cmd_start(port, dir, watch, debug, debug_port, debug_python, debug_python_port, var_files))
         }
         Commands::Invoke {
             function,
@@ -165,11 +177,11 @@ fn main() -> anyhow::Result<()> {
         } => {
             cmd_invoke(function, event, event_file)
         }
-        Commands::Config { json, dir } => {
-            cmd_config(json, dir)
+        Commands::Config { json, dir, var_files } => {
+            cmd_config(json, dir, var_files)
         }
-        Commands::Validate { dir } => {
-            cmd_validate(dir)
+        Commands::Validate { dir, var_files } => {
+            cmd_validate(dir, var_files)
         }
         Commands::Trigger { source_type, source, message, batch, dir, function } => {
             let rt = tokio::runtime::Runtime::new()?;
@@ -181,7 +193,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port: u16, debug_python: bool, debug_python_port: u16) -> anyhow::Result<()> {
+async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port: u16, debug_python: bool, debug_python_port: u16, var_files: Vec<PathBuf>) -> anyhow::Result<()> {
     println!(
         r#"
 ┌─────────────────────────────────────────┐
@@ -193,8 +205,8 @@ async fn cmd_start(port: u16, dir: PathBuf, watch: bool, debug: bool, debug_port
 
     println!("📂 Loading Terraform from: {}", dir.display());
 
-    // Parse Terraform files
-    let mut config = parser::parse_terraform_dir(&dir)?;
+    // Parse Terraform files (with any --var-file paths)
+    let mut config = parser::parse_terraform_dir_with_var_files(&dir, &var_files)?;
 
     // Load and apply project config (lambdaform.yaml)
     let project_config = project_config::ProjectConfig::load(&dir)?;
@@ -508,8 +520,8 @@ fn cmd_invoke(
     })
 }
 
-fn cmd_config(json_output: bool, dir: PathBuf) -> anyhow::Result<()> {
-    let config = parser::parse_terraform_dir(&dir)?;
+fn cmd_config(json_output: bool, dir: PathBuf, var_files: Vec<PathBuf>) -> anyhow::Result<()> {
+    let config = parser::parse_terraform_dir_with_var_files(&dir, &var_files)?;
     
     if json_output {
         println!("{}", serde_json::to_string_pretty(&config)?);
@@ -616,7 +628,7 @@ fn cmd_config(json_output: bool, dir: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_validate(dir: PathBuf) -> anyhow::Result<()> {
+fn cmd_validate(dir: PathBuf, var_files: Vec<PathBuf>) -> anyhow::Result<()> {
     println!("🔍 Validating Terraform in: {}\n", dir.display());
 
     let mut errors: Vec<String> = Vec::new();
@@ -646,7 +658,7 @@ fn cmd_validate(dir: PathBuf) -> anyhow::Result<()> {
     println!("   Found {} .tf file(s)", tf_files.len());
 
     // Try parsing
-    let config = match parser::parse_terraform_dir(&dir) {
+    let config = match parser::parse_terraform_dir_with_var_files(&dir, &var_files) {
         Ok(c) => c,
         Err(e) => {
             println!("\n❌ Parse error: {}", e);

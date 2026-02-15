@@ -1,6 +1,7 @@
 //! HCL Parser for Terraform files
 //!
 //! Extracts Lambda and API Gateway configurations from .tf files.
+//! Supports Terraform variable resolution from variable blocks and .tfvars files.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -10,8 +11,169 @@ use walkdir::WalkDir;
 
 use crate::config::*;
 
+/// Resolves Terraform variable references (var.xxx) to their values.
+///
+/// Resolution order (last wins):
+/// 1. `variable` block `default` values from .tf files
+/// 2. `terraform.tfvars` (auto-loaded)
+/// 3. `*.auto.tfvars` (auto-loaded, alphabetical)
+#[derive(Debug, Default, Clone)]
+pub struct VariableResolver {
+    variables: HashMap<String, String>,
+}
+
+impl VariableResolver {
+    /// Build a resolver by scanning a directory for variable definitions and .tfvars files.
+    /// Extra var_files are loaded last (highest priority), matching `terraform -var-file` behavior.
+    pub fn from_dir(dir: &Path) -> Result<Self> {
+        Self::from_dir_with_var_files(dir, &[])
+    }
+
+    /// Build a resolver with additional -var-file paths.
+    pub fn from_dir_with_var_files(dir: &Path, var_files: &[std::path::PathBuf]) -> Result<Self> {
+        let mut resolver = Self::default();
+        
+        // Pass 1: Collect variable defaults from .tf files
+        let mut tf_files: Vec<_> = Vec::new();
+        for entry in WalkDir::new(dir)
+            .max_depth(2)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path().to_path_buf();
+            if path.extension().map_or(false, |ext| ext == "tf") {
+                tf_files.push(path);
+            }
+        }
+        
+        for path in &tf_files {
+            let content = fs::read_to_string(path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            if let Ok(body) = hcl::from_str::<hcl::Body>(&content) {
+                resolver.collect_variable_defaults(&body);
+            }
+        }
+        
+        // Pass 2: Load terraform.tfvars (auto-loaded by Terraform)
+        let tfvars_path = dir.join("terraform.tfvars");
+        if tfvars_path.exists() {
+            resolver.load_tfvars(&tfvars_path)?;
+        }
+        
+        // Pass 3: Load *.auto.tfvars (alphabetical order)
+        let mut auto_tfvars: Vec<_> = Vec::new();
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".auto.tfvars") {
+                    auto_tfvars.push(path);
+                }
+            }
+        }
+        auto_tfvars.sort();
+        for path in &auto_tfvars {
+            resolver.load_tfvars(path)?;
+        }
+        
+        // Pass 4: Load explicit -var-file paths (highest priority)
+        for path in var_files {
+            resolver.load_tfvars(path)?;
+        }
+        
+        if !resolver.variables.is_empty() {
+            tracing::info!("Resolved {} Terraform variable(s)", resolver.variables.len());
+            for (k, v) in &resolver.variables {
+                tracing::debug!("  var.{} = {:?}", k, v);
+            }
+        }
+        
+        Ok(resolver)
+    }
+    
+    /// Extract default values from `variable` blocks.
+    fn collect_variable_defaults(&mut self, body: &hcl::Body) {
+        for block in body.blocks() {
+            if block.identifier.to_string() == "variable" {
+                if let Some(label) = block.labels.first() {
+                    let var_name = label_to_string(label);
+                    // Look for a `default` attribute
+                    for attr in block.body.attributes() {
+                        if attr.key.to_string() == "default" {
+                            if let Some(val) = expr_to_string(&attr.expr) {
+                                self.variables.insert(var_name.clone(), val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Load variable values from a .tfvars file.
+    fn load_tfvars(&mut self, path: &Path) -> Result<()> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let body: hcl::Body = hcl::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
+        
+        for attr in body.attributes() {
+            let key = attr.key.to_string();
+            if let Some(val) = expr_to_string(&attr.expr) {
+                self.variables.insert(key, val);
+            }
+        }
+        
+        tracing::debug!("Loaded tfvars from {}", path.display());
+        Ok(())
+    }
+    
+    /// Resolve a string that may contain `var.xxx` references.
+    /// Handles both bare traversals (`var.prefix`) and template interpolation (`"${var.prefix}-api"`).
+    pub fn resolve(&self, value: &str) -> String {
+        if self.variables.is_empty() || !value.contains("var.") {
+            return value.to_string();
+        }
+        
+        // Replace ${var.name} interpolations
+        let mut result = value.to_string();
+        for (name, val) in &self.variables {
+            let pattern = format!("${{var.{}}}", name);
+            result = result.replace(&pattern, val);
+        }
+        result
+    }
+    
+    /// Resolve a traversal expression like `var.prefix` to its value.
+    pub fn resolve_traversal(&self, traversal_str: &str) -> Option<String> {
+        if let Some(var_name) = traversal_str.strip_prefix("var.") {
+            self.variables.get(var_name).cloned()
+        } else {
+            None
+        }
+    }
+}
+
+/// Extract a string value from an HCL expression (for variable defaults and tfvars).
+fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
+    match expr {
+        hcl::Expression::String(s) => Some(s.to_string()),
+        hcl::Expression::Number(n) => Some(n.to_string()),
+        hcl::Expression::Bool(b) => Some(b.to_string()),
+        hcl::Expression::TemplateExpr(t) => Some(t.to_string()),
+        _ => None,
+    }
+}
+
 /// Parse all Terraform files in a directory
 pub fn parse_terraform_dir(dir: &Path) -> Result<LambdaformConfig> {
+    parse_terraform_dir_with_var_files(dir, &[])
+}
+
+/// Parse all Terraform files in a directory with additional -var-file paths
+pub fn parse_terraform_dir_with_var_files(dir: &Path, var_files: &[std::path::PathBuf]) -> Result<LambdaformConfig> {
+    let resolver = VariableResolver::from_dir_with_var_files(dir, var_files)?;
+    
     let mut config = LambdaformConfig::default();
     
     // Find all .tf files
@@ -24,7 +186,7 @@ pub fn parse_terraform_dir(dir: &Path) -> Result<LambdaformConfig> {
         let path = entry.path();
         if path.extension().map_or(false, |ext| ext == "tf") {
             tracing::debug!("Parsing: {}", path.display());
-            parse_tf_file(path, &mut config)?;
+            parse_tf_file(path, &mut config, &resolver)?;
         }
     }
     
@@ -98,7 +260,7 @@ struct Apigwv2Integration {
 }
 
 /// Parse a single .tf file
-fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
+fn parse_tf_file(path: &Path, config: &mut LambdaformConfig, resolver: &VariableResolver) -> Result<()> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     
@@ -125,7 +287,7 @@ fn parse_tf_file(path: &Path, config: &mut LambdaformConfig) -> Result<()> {
                 
                 match resource_type.as_str() {
                     "aws_lambda_function" => {
-                        if let Some(lambda) = parse_lambda_function(&resource_name, block)? {
+                        if let Some(lambda) = parse_lambda_function(&resource_name, block, resolver)? {
                             config.functions.push(lambda);
                         }
                     }
@@ -571,14 +733,14 @@ fn parse_http_method(s: &str) -> HttpMethod {
 }
 
 /// Parse aws_lambda_function resource
-fn parse_lambda_function(name: &str, block: &hcl::Block) -> Result<Option<LambdaConfig>> {
+fn parse_lambda_function(name: &str, block: &hcl::Block, resolver: &VariableResolver) -> Result<Option<LambdaConfig>> {
     let body = &block.body;
     
-    // Extract required attributes
-    let function_name = get_string_attr(body, "function_name")
+    // Extract required attributes (with variable resolution)
+    let function_name = get_string_attr_resolved(body, "function_name", resolver)
         .unwrap_or_else(|| name.to_string());
     
-    let handler = match get_string_attr(body, "handler") {
+    let handler = match get_string_attr_resolved(body, "handler", resolver) {
         Some(h) => h,
         None => {
             tracing::warn!("Lambda {} missing handler, skipping", name);
@@ -586,7 +748,7 @@ fn parse_lambda_function(name: &str, block: &hcl::Block) -> Result<Option<Lambda
         }
     };
     
-    let runtime_str = match get_string_attr(body, "runtime") {
+    let runtime_str = match get_string_attr_resolved(body, "runtime", resolver) {
         Some(r) => r,
         None => {
             tracing::warn!("Lambda {} missing runtime, skipping", name);
@@ -598,14 +760,13 @@ fn parse_lambda_function(name: &str, block: &hcl::Block) -> Result<Option<Lambda
     let timeout = get_number_attr(body, "timeout").unwrap_or(3);
     let memory_size = get_number_attr(body, "memory_size").unwrap_or(128);
     
-    // Extract environment variables
-    let environment = extract_environment(body);
+    // Extract environment variables (with variable resolution)
+    let environment = extract_environment_resolved(body, resolver);
     
     // Try to find source path
-    let source_path = get_string_attr(body, "filename")
+    let source_path = get_string_attr_resolved(body, "filename", resolver)
         .or_else(|| get_string_attr(body, "source_code_hash").and_then(|_| {
-            // If there's a source_code_hash, try to find related archive
-            get_string_attr(body, "filename")
+            get_string_attr_resolved(body, "filename", resolver)
         }))
         .map(std::path::PathBuf::from);
     
@@ -903,14 +1064,39 @@ fn get_traversal_attr(body: &hcl::Body, name: &str) -> Option<String> {
         })
 }
 
-/// Get a string attribute from HCL body
+/// Get a string attribute from HCL body (without variable resolution)
 fn get_string_attr(body: &hcl::Body, name: &str) -> Option<String> {
+    get_string_attr_resolved(body, name, &VariableResolver::default())
+}
+
+/// Get a string attribute from HCL body, resolving var.xxx references
+fn get_string_attr_resolved(body: &hcl::Body, name: &str, resolver: &VariableResolver) -> Option<String> {
     body.attributes()
         .find(|attr| attr.key.to_string() == name)
         .and_then(|attr| {
             match &attr.expr {
-                hcl::Expression::String(s) => Some(s.to_string()),
-                hcl::Expression::TemplateExpr(t) => Some(t.to_string()),
+                hcl::Expression::String(s) => {
+                    let resolved = resolver.resolve(s);
+                    Some(resolved)
+                },
+                hcl::Expression::TemplateExpr(t) => {
+                    let resolved = resolver.resolve(&t.to_string());
+                    Some(resolved)
+                },
+                hcl::Expression::Traversal(traversal) => {
+                    // Handle bare var.xxx references
+                    let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                        .chain(traversal.operators.iter().map(|op| {
+                            match op {
+                                hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                                hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                                _ => String::new(),
+                            }
+                        }))
+                        .collect();
+                    let traversal_str = parts.join(".");
+                    resolver.resolve_traversal(&traversal_str)
+                },
                 _ => None,
             }
         })
@@ -941,21 +1127,39 @@ fn get_number_attr(body: &hcl::Body, name: &str) -> Option<u32> {
         })
 }
 
-/// Extract environment variables from Lambda resource
-fn extract_environment(body: &hcl::Body) -> HashMap<String, String> {
+/// Extract environment variables from Lambda resource with variable resolution
+fn extract_environment_resolved(body: &hcl::Body, resolver: &VariableResolver) -> HashMap<String, String> {
     let mut env = HashMap::new();
     
-    // Look for environment block
     for block in body.blocks() {
         let identifier = block.identifier.to_string();
         if identifier == "environment" {
-            // Look for variables attribute inside
             for attr in block.body.attributes() {
                 if attr.key.to_string() == "variables" {
                     if let hcl::Expression::Object(obj) = &attr.expr {
                         for (key, value) in obj.iter() {
-                            if let (hcl::ObjectKey::Identifier(k), hcl::Expression::String(v)) = (key, value) {
-                                env.insert(k.to_string(), v.to_string());
+                            if let hcl::ObjectKey::Identifier(k) = key {
+                                let resolved_value = match value {
+                                    hcl::Expression::String(v) => Some(resolver.resolve(v)),
+                                    hcl::Expression::TemplateExpr(t) => Some(resolver.resolve(&t.to_string())),
+                                    hcl::Expression::Traversal(traversal) => {
+                                        let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                                            .chain(traversal.operators.iter().map(|op| {
+                                                match op {
+                                                    hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                                                    hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                                                    _ => String::new(),
+                                                }
+                                            }))
+                                            .collect();
+                                        let traversal_str = parts.join(".");
+                                        resolver.resolve_traversal(&traversal_str)
+                                    },
+                                    _ => None,
+                                };
+                                if let Some(val) = resolved_value {
+                                    env.insert(k.to_string(), val);
+                                }
                             }
                         }
                     }
@@ -1535,5 +1739,116 @@ resource "aws_lambda_event_source_mapping" "sqs_worker" {
         assert_eq!(esm.source_resource, "tasks");
         assert_eq!(esm.function_resource, "worker");
         assert_eq!(esm.batch_size, 5);
+    }
+
+    #[test]
+    fn test_variable_resolution_from_defaults() {
+        let tf_content = r#"
+variable "project" {
+  type    = string
+  default = "myapp"
+}
+
+variable "env" {
+  type    = string
+  default = "dev"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "${var.project}-${var.env}-api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  timeout       = 30
+
+  environment {
+    variables = {
+      PROJECT = var.project
+      ENV     = var.env
+      MIXED   = "${var.project}-service"
+    }
+  }
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions.len(), 1);
+
+        let func = &config.functions[0];
+        assert_eq!(func.function_name, "myapp-dev-api");
+        assert_eq!(func.environment.get("PROJECT"), Some(&"myapp".to_string()));
+        assert_eq!(func.environment.get("ENV"), Some(&"dev".to_string()));
+        assert_eq!(func.environment.get("MIXED"), Some(&"myapp-service".to_string()));
+    }
+
+    #[test]
+    fn test_variable_resolution_from_tfvars() {
+        let tf_content = r#"
+variable "project" {
+  type    = string
+  default = "default-name"
+}
+
+variable "region" {
+  type = string
+}
+
+resource "aws_lambda_function" "worker" {
+  function_name = var.project
+  handler       = "main.handler"
+  runtime       = "python3.12"
+
+  environment {
+    variables = {
+      REGION = var.region
+    }
+  }
+}
+"#;
+
+        let tfvars_content = r#"
+project = "overridden-name"
+region  = "us-west-2"
+"#;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        fs::write(dir.path().join("terraform.tfvars"), tfvars_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions.len(), 1);
+
+        let func = &config.functions[0];
+        // tfvars should override variable defaults
+        assert_eq!(func.function_name, "overridden-name");
+        assert_eq!(func.environment.get("REGION"), Some(&"us-west-2".to_string()));
+    }
+
+    #[test]
+    fn test_auto_tfvars_override_order() {
+        let tf_content = r#"
+variable "stage" {
+  type    = string
+  default = "dev"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = var.stage
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        fs::write(dir.path().join("terraform.tfvars"), "stage = \"from-tfvars\"\n").unwrap();
+        fs::write(dir.path().join("prod.auto.tfvars"), "stage = \"prod\"\n").unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        // auto.tfvars should override terraform.tfvars
+        assert_eq!(func.function_name, "prod");
     }
 }
