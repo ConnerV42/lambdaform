@@ -9,6 +9,9 @@ keywords = ["aws", "lambda", "terraform", "serverless", "local-development"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+# Encoding
+base64 = "0.22"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

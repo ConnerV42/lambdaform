@@ -13,7 +13,7 @@ use futures::{SinkExt, StreamExt};
 
 use crate::config::{LambdaConfig, LambdaformConfig};
 use crate::pool::ProcessPool;
-use crate::runtime::{DebugOptions, FunctionExecutor, LambdaContext, RequestIdentity, WebSocketEvent, WebSocketRequestContext};
+use crate::runtime::{DebugOptions, FunctionExecutor, RequestIdentity, WebSocketEvent, WebSocketRequestContext};
 
 /// Shared state for WebSocket connections
 pub struct WsState {
@@ -388,22 +388,6 @@ async fn invoke_route_handler(
         }
     };
 
-    let context = LambdaContext {
-        function_name: function.function_name.clone(),
-        function_version: "$LATEST".to_string(),
-        memory_limit_in_mb: function.memory_size,
-        aws_request_id: format!("ws-{:x}", now.as_nanos()),
-        invoked_function_arn: format!(
-            "arn:aws:lambda:local:000000000000:function:{}",
-            function.function_name
-        ),
-    };
-
-    let _payload = serde_json::json!({
-        "event": event_json,
-        "context": context,
-    });
-
     // Resolve layer paths
     let config = state.config.read().await;
     let layer_paths = crate::server::resolve_layer_paths(&function, &config.layers, &state.source_dir);
@@ -416,37 +400,33 @@ async fn invoke_route_handler(
 
     let start = std::time::Instant::now();
 
-    // For WebSocket, we invoke the function with the raw event (not via the HTTP invoke path)
-    // We need to use invoke_nodejs_raw/invoke_python_raw style, but returning LambdaResponse
-    // Actually, Lambda functions for WebSocket still return { statusCode, body } format
-    // Let's use the pool-based invocation via a synthetic LambdaEvent
-    let lambda_event = crate::runtime::LambdaEvent {
-        http_method: "WEBSOCKET".to_string(),
-        path: route_key.to_string(),
-        resource: route_key.to_string(),
-        path_parameters: None,
-        query_string_parameters: None,
-        headers: event.headers,
-        body: event.body,
-        is_base64_encoded: false,
-        request_context: crate::runtime::RequestContext {
-            stage: "local".to_string(),
-            resource_path: route_key.to_string(),
-            http_method: "WEBSOCKET".to_string(),
-            request_id: event.request_context.request_id.clone(),
-            api_id: "lambdaform".to_string(),
-            path: route_key.to_string(),
-            identity: event.request_context.identity.clone(),
-        },
-    };
-
-    match executor.invoke(lambda_event).await {
-        Ok(response) => {
+    // Send the proper WebSocketEvent to the Lambda function (not LambdaEvent)
+    match executor.invoke_raw_event(event_json).await {
+        Ok(raw_result) => {
             let duration = start.elapsed();
+            // Parse response — WebSocket handlers return { statusCode, body } like HTTP handlers
+            let status_code = raw_result.get("statusCode")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(200) as u16;
+            let body = raw_result.get("body")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let headers = raw_result.get("headers")
+                .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v.clone()).ok());
+            let is_base64_encoded = raw_result.get("isBase64Encoded")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
             tracing::info!("← WS {} {} → {} [{:.1}ms]",
-                route_key, event_type, response.status_code,
+                route_key, event_type, status_code,
                 duration.as_secs_f64() * 1000.0);
-            Some(response)
+
+            Some(crate::runtime::LambdaResponse {
+                status_code,
+                headers,
+                body,
+                is_base64_encoded,
+            })
         }
         Err(e) => {
             let duration = start.elapsed();
@@ -485,11 +465,8 @@ async fn start_connections_api(state: Arc<WsState>, port: u16) {
 }
 
 fn base64_encode(data: &[u8]) -> String {
-    // Simple base64 encoding without external dependency
-    use std::io::Write;
-    let mut buf = Vec::new();
-    let _ = write!(buf, "{}", data.iter().map(|b| format!("{:02x}", b)).collect::<String>());
-    String::from_utf8(buf).unwrap_or_default()
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 #[cfg(test)]
