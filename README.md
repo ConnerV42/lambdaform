@@ -53,22 +53,33 @@ lambdaform start
 
 ## Demo
 
+[![asciicast](https://asciinema.org/a/N79Qw2QUHtMwJL9F.svg)](https://asciinema.org/a/N79Qw2QUHtMwJL9F)
+
+<details>
+<summary>Text version</summary>
+
 ```bash
 $ lambdaform validate
 🔍 Validating Terraform in: ./
-   Found 2 .tf file(s)
+   Found 1 .tf file(s)
    Found 3 function(s), 1 gateway(s), 3 route(s)
 ✅ Validation passed!
 
 $ lambdaform start
-🚀 Lambdaform dev server
-📦 Loaded 3 functions, 3 routes
-🔥 Hot reload enabled — watching for changes
-🌐 http://localhost:3000
+📦 Lambda Functions:
+   • hello-world (Nodejs20) → index.handler
+   • echo (Nodejs20) → echo.handler
+   • get-user (Nodejs20) → users.handler
+🔥 Server running at http://localhost:3000
 
-$ curl http://localhost:3000/users/42
-{"statusCode":200,"body":"{\"id\":\"42\",\"name\":\"Alice\"}"}
+$ curl -s localhost:3000/hello?name=World | jq .
+{
+  "message": "Hello from Lambdaform! Welcome, World!",
+  "environment": "local",
+  "requestId": "local-a1b2c3d4"
+}
 ```
+</details>
 
 ## Supported Runtimes
 
