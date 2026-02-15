@@ -1,7 +1,7 @@
 class Lambdaform < Formula
   desc "Terraform-native local Lambda emulator — no Docker, no CloudFormation"
   homepage "https://github.com/ConnerV42/lambdaform"
-  version "0.4.0"
+  version "0.5.0"
   license "MIT"
 
   on_macos do
