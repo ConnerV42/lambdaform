@@ -36,7 +36,11 @@ If you use Terraform for Lambda infrastructure, your local development options a
 ## Quick Start
 
 ```bash
-# Install
+# Install via Homebrew (macOS/Linux)
+brew tap ConnerV42/lambdaform
+brew install lambdaform
+
+# Or via Cargo
 cargo install lambdaform
 
 # Start in your Terraform project
