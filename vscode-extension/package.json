@@ -1,0 +1,181 @@
+{
+  "name": "lambdaform",
+  "displayName": "Lambdaform",
+  "description": "Terraform-native local Lambda development — function explorer, invoke, and log viewer",
+  "version": "0.1.0",
+  "publisher": "connerv42",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ConnerV42/lambdaform"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "Debuggers"],
+  "keywords": ["lambda", "terraform", "serverless", "aws", "local"],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "workspaceContains:**/*.tf",
+    "workspaceContains:lambdaform.yaml",
+    "workspaceContains:lambdaform.yml"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lambdaform",
+          "title": "Lambdaform",
+          "icon": "media/lambda.svg"
+        }
+      ]
+    },
+    "views": {
+      "lambdaform": [
+        {
+          "id": "lambdaformFunctions",
+          "name": "Functions"
+        },
+        {
+          "id": "lambdaformLogs",
+          "name": "Invocation Logs"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "lambdaform.start",
+        "title": "Lambdaform: Start Server",
+        "icon": "$(play)"
+      },
+      {
+        "command": "lambdaform.stop",
+        "title": "Lambdaform: Stop Server",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "lambdaform.refresh",
+        "title": "Lambdaform: Refresh Functions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "lambdaform.invoke",
+        "title": "Lambdaform: Invoke Function",
+        "icon": "$(play)"
+      },
+      {
+        "command": "lambdaform.invokeWithPayload",
+        "title": "Lambdaform: Invoke Function with Payload",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "lambdaform.viewLogs",
+        "title": "Lambdaform: View Function Logs"
+      },
+      {
+        "command": "lambdaform.clearLogs",
+        "title": "Lambdaform: Clear Logs",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "lambdaform.openConfig",
+        "title": "Lambdaform: Open Configuration"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "lambdaform.refresh",
+          "when": "view == lambdaformFunctions",
+          "group": "navigation"
+        },
+        {
+          "command": "lambdaform.start",
+          "when": "view == lambdaformFunctions && !lambdaform.serverRunning",
+          "group": "navigation"
+        },
+        {
+          "command": "lambdaform.stop",
+          "when": "view == lambdaformFunctions && lambdaform.serverRunning",
+          "group": "navigation"
+        },
+        {
+          "command": "lambdaform.clearLogs",
+          "when": "view == lambdaformLogs",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "lambdaform.invoke",
+          "when": "view == lambdaformFunctions && viewItem == function",
+          "group": "inline"
+        },
+        {
+          "command": "lambdaform.invokeWithPayload",
+          "when": "view == lambdaformFunctions && viewItem == function"
+        },
+        {
+          "command": "lambdaform.viewLogs",
+          "when": "view == lambdaformFunctions && viewItem == function"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Lambdaform",
+      "properties": {
+        "lambdaform.binaryPath": {
+          "type": "string",
+          "default": "lambdaform",
+          "description": "Path to the lambdaform binary"
+        },
+        "lambdaform.port": {
+          "type": "number",
+          "default": 3000,
+          "description": "Port for the local development server"
+        },
+        "lambdaform.terraformDir": {
+          "type": "string",
+          "default": ".",
+          "description": "Directory containing Terraform files (relative to workspace)"
+        },
+        "lambdaform.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start the server when a Terraform workspace is opened"
+        },
+        "lambdaform.verbose": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose logging"
+        },
+        "lambdaform.jsonLog": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable JSON structured logging (used for log parsing)"
+        },
+        "lambdaform.varFiles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Additional .tfvars files to load"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  }
+}
