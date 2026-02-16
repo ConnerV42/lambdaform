@@ -20,6 +20,7 @@ use crate::config::*;
 #[derive(Debug, Default, Clone)]
 pub struct VariableResolver {
     pub(crate) variables: HashMap<String, String>,
+    pub(crate) locals: HashMap<String, String>,
 }
 
 impl VariableResolver {
@@ -91,6 +92,25 @@ impl VariableResolver {
             }
         }
 
+        // Pass 5: Collect locals from .tf files (after variables are loaded so we can resolve references)
+        for path in &tf_files {
+            let content = fs::read_to_string(path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            if let Ok(body) = hcl::from_str::<hcl::Body>(&content) {
+                resolver.collect_locals(&body);
+            }
+        }
+
+        // Resolve locals iteratively (locals can reference other locals and variables)
+        resolver.resolve_locals();
+
+        if !resolver.locals.is_empty() {
+            tracing::info!("Resolved {} Terraform local(s)", resolver.locals.len());
+            for (k, v) in &resolver.locals {
+                tracing::debug!("  local.{} = {:?}", k, v);
+            }
+        }
+
         Ok(resolver)
     }
 
@@ -131,26 +151,72 @@ impl VariableResolver {
         Ok(())
     }
 
-    /// Resolve a string that may contain `var.xxx` references.
-    /// Handles both bare traversals (`var.prefix`) and template interpolation (`"${var.prefix}-api"`).
+    /// Collect local values from `locals` blocks.
+    fn collect_locals(&mut self, body: &hcl::Body) {
+        for block in body.blocks() {
+            if block.identifier.to_string() == "locals" {
+                for attr in block.body.attributes() {
+                    let key = attr.key.to_string();
+                    if let Some(val) = expr_to_string(&attr.expr) {
+                        self.locals.insert(key, val);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve locals iteratively — locals can reference var.xxx and other locals.
+    /// Runs multiple passes until no more substitutions happen (handles ordering).
+    fn resolve_locals(&mut self) {
+        for _ in 0..20 {
+            let mut changed = false;
+            let snapshot: Vec<(String, String)> = self
+                .locals
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (key, value) in snapshot {
+                let resolved = self.resolve(&value);
+                if resolved != value {
+                    self.locals.insert(key, resolved);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// Resolve a string that may contain `var.xxx` or `local.xxx` references.
+    /// Handles both bare traversals and template interpolation (`"${var.prefix}-api"`).
     pub fn resolve(&self, value: &str) -> String {
-        if self.variables.is_empty() || !value.contains("var.") {
+        if (self.variables.is_empty() && self.locals.is_empty())
+            || (!value.contains("var.") && !value.contains("local."))
+        {
             return value.to_string();
         }
 
-        // Replace ${var.name} interpolations
         let mut result = value.to_string();
+        // Replace ${var.name} interpolations
         for (name, val) in &self.variables {
             let pattern = format!("${{var.{}}}", name);
+            result = result.replace(&pattern, val);
+        }
+        // Replace ${local.name} interpolations
+        for (name, val) in &self.locals {
+            let pattern = format!("${{local.{}}}", name);
             result = result.replace(&pattern, val);
         }
         result
     }
 
-    /// Resolve a traversal expression like `var.prefix` to its value.
+    /// Resolve a traversal expression like `var.prefix` or `local.prefix` to its value.
     pub fn resolve_traversal(&self, traversal_str: &str) -> Option<String> {
         if let Some(var_name) = traversal_str.strip_prefix("var.") {
             self.variables.get(var_name).cloned()
+        } else if let Some(local_name) = traversal_str.strip_prefix("local.") {
+            self.locals.get(local_name).cloned()
         } else {
             None
         }
@@ -2638,5 +2704,77 @@ resource "aws_lambda_function" "api" {
             .find(|t| t.resource_name == "api.data")
             .expect("api.data table should exist from module");
         assert_eq!(table.name, "dev-data");
+    }
+
+    #[test]
+    fn test_locals_interpolation() {
+        let tf_content = r#"
+variable "env" {
+  type    = string
+  default = "prod"
+}
+
+locals {
+  prefix     = "myapp-${var.env}"
+  table_name = "${local.prefix}-users"
+  static_val = "hello"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "${local.prefix}-api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "api.zip"
+
+  environment {
+    variables = {
+      TABLE_NAME = "${local.table_name}"
+      GREETING   = "${local.static_val}"
+    }
+  }
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions.len(), 1);
+
+        let func = &config.functions[0];
+        assert_eq!(func.function_name, "myapp-prod-api");
+        assert_eq!(
+            func.environment.get("TABLE_NAME"),
+            Some(&"myapp-prod-users".to_string())
+        );
+        assert_eq!(func.environment.get("GREETING"), Some(&"hello".to_string()));
+    }
+
+    #[test]
+    fn test_locals_cross_reference() {
+        let tf_content = r#"
+locals {
+  region  = "us-west-2"
+  account = "123456789"
+  arn_prefix = "arn:aws:lambda:${local.region}:${local.account}"
+}
+
+resource "aws_lambda_function" "worker" {
+  function_name = "${local.arn_prefix}-worker"
+  handler       = "main.handler"
+  runtime       = "python3.12"
+  filename      = "worker.zip"
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        assert_eq!(
+            func.function_name,
+            "arn:aws:lambda:us-west-2:123456789-worker"
+        );
     }
 }
