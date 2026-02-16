@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::{ApiGatewayConfig, LambdaConfig, LambdaformConfig};
+use crate::history::HistoryRecorder;
 use crate::pool::ProcessPool;
 use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
@@ -36,6 +37,10 @@ pub struct AppState {
     pub gateway_resource: Option<String>,
     /// Warm process pool for Node.js/Python workers
     pub pool: Arc<ProcessPool>,
+    /// Request history recorder
+    pub history: Option<HistoryRecorder>,
+    /// Port this server is bound to (for history recording)
+    pub port: u16,
 }
 
 /// The reloadable portion of app state
@@ -58,6 +63,8 @@ impl AppState {
             debug,
             gateway_resource: None,
             pool: Arc::new(ProcessPool::new()),
+            history: None,
+            port: 0,
         }
     }
 
@@ -75,7 +82,16 @@ impl AppState {
             debug,
             gateway_resource: Some(gateway.resource_name.clone()),
             pool: Arc::new(ProcessPool::new()),
+            history: None,
+            port: 0,
         }
+    }
+
+    /// Set the history recorder and port for this state
+    pub fn with_history(mut self, history: HistoryRecorder, port: u16) -> Self {
+        self.history = Some(history);
+        self.port = port;
+        self
     }
 
     /// Reload configuration from Terraform files
@@ -226,7 +242,18 @@ pub async fn start_server(
     cors_config: Option<&CorsConfig>,
     debug: Option<DebugOptions>,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(AppState::new(config, source_dir, debug));
+    let history = HistoryRecorder::new(&source_dir).ok();
+    if let Some(ref h) = history {
+        tracing::info!(
+            "📝 Recording request history to {}",
+            h.file_path().display()
+        );
+    }
+    let mut state = AppState::new(config, source_dir, debug);
+    if let Some(h) = history {
+        state = state.with_history(h, port);
+    }
+    let state = Arc::new(state);
     let pool = state.pool.clone();
     let cors = build_cors_layer(cors_config);
 
@@ -275,12 +302,13 @@ pub async fn start_multi_gateway(
             .find(|g| g.resource_name == binding.gateway_resource)
             .ok_or_else(|| anyhow::anyhow!("Gateway '{}' not found", binding.gateway_resource))?;
 
-        let state = Arc::new(AppState::for_gateway(
-            config.clone(),
-            gateway,
-            source_dir.clone(),
-            debug.clone(),
-        ));
+        let history = HistoryRecorder::new(&source_dir).ok();
+        let mut gw_state =
+            AppState::for_gateway(config.clone(), gateway, source_dir.clone(), debug.clone());
+        if let Some(h) = history {
+            gw_state = gw_state.with_history(h, binding.port);
+        }
+        let state = Arc::new(gw_state);
         pools.push(state.pool.clone());
 
         if watch {
@@ -342,7 +370,18 @@ pub async fn start_server_with_watch(
     cors_config: Option<&CorsConfig>,
     debug: Option<DebugOptions>,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(AppState::new(config, source_dir.clone(), debug));
+    let history = HistoryRecorder::new(&source_dir).ok();
+    if let Some(ref h) = history {
+        tracing::info!(
+            "📝 Recording request history to {}",
+            h.file_path().display()
+        );
+    }
+    let mut app_state = AppState::new(config, source_dir.clone(), debug);
+    if let Some(h) = history {
+        app_state = app_state.with_history(h, port);
+    }
+    let state = Arc::new(app_state);
     let pool = state.pool.clone();
     let cors = build_cors_layer(cors_config);
 
@@ -434,6 +473,38 @@ fn format_bytes(bytes: usize) -> String {
     } else {
         format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+/// Format current time as ISO 8601 (UTC)
+fn format_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    // Simple UTC timestamp without chrono dependency
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    // Calculate date from days since epoch (civil_from_days algorithm)
+    let z = days as i64 + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hours, minutes, seconds
+    )
 }
 
 /// Handle incoming HTTP requests
@@ -651,6 +722,27 @@ async fn handle_request(
         .with_pool(Some(state.pool.clone()))
         .with_layer_paths(layer_paths);
 
+    // Capture request data for history recording (before invoke consumes things)
+    let history_method = method.to_string();
+    let history_path = path.clone();
+    let history_query = if query.is_empty() {
+        None
+    } else {
+        Some(query.clone())
+    };
+    let history_headers = Some(
+        headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect::<HashMap<String, String>>(),
+    );
+    let history_body = if body.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&body).to_string())
+    };
+    let history_function = function.function_name.clone();
+
     match executor.invoke(event).await {
         Ok(response) => {
             let duration = request_start.elapsed();
@@ -688,6 +780,30 @@ async fn handle_request(
                 );
             }
 
+            // Record to history
+            if let Some(ref history) = state.history {
+                let truncated_body = if response_body.len() > 10240 {
+                    Some(format!("{}...[truncated]", &response_body[..10240]))
+                } else {
+                    Some(response_body.clone())
+                };
+                let entry = crate::history::HistoryEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    timestamp: format_timestamp(),
+                    method: history_method,
+                    path: history_path,
+                    query: history_query,
+                    headers: history_headers,
+                    body: history_body,
+                    function: history_function,
+                    status: status.as_u16(),
+                    response_body: truncated_body,
+                    duration_ms: duration.as_millis() as u64,
+                    port: state.port,
+                };
+                history.record(entry).await;
+            }
+
             let mut builder = axum::response::Response::builder().status(response.status_code);
 
             if let Some(headers) = response.headers {
@@ -706,6 +822,26 @@ async fn handle_request(
         }
         Err(e) => {
             let duration = request_start.elapsed();
+
+            // Record error to history
+            if let Some(ref history) = state.history {
+                let entry = crate::history::HistoryEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    timestamp: format_timestamp(),
+                    method: history_method,
+                    path: history_path,
+                    query: history_query,
+                    headers: history_headers,
+                    body: history_body,
+                    function: history_function,
+                    status: 500,
+                    response_body: Some(e.to_string()),
+                    duration_ms: duration.as_millis() as u64,
+                    port: state.port,
+                };
+                history.record(entry).await;
+            }
+
             tracing::error!(
                 "← ❌ 500 {} {} [{}] error: {}",
                 method,

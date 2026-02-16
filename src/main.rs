@@ -143,6 +143,45 @@ enum Commands {
         yes: bool,
     },
 
+    /// Show or replay request history from previous sessions
+    Replay {
+        /// Directory containing Terraform files (with .lambdaform/)
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+
+        /// Replay a specific request by index (1-based)
+        #[arg(short = 'n', long)]
+        index: Option<usize>,
+
+        /// Replay all recorded requests sequentially
+        #[arg(long)]
+        all: bool,
+
+        /// Show only the last N entries
+        #[arg(short, long)]
+        last: Option<usize>,
+
+        /// Filter by HTTP method (GET, POST, etc.)
+        #[arg(short, long)]
+        method: Option<String>,
+
+        /// Filter by path prefix
+        #[arg(short, long)]
+        path: Option<String>,
+
+        /// Clear history file
+        #[arg(long)]
+        clear: bool,
+
+        /// Target port for replay (default: from recorded entry)
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Visualize Step Functions state machines (read-only)
     #[command(name = "stepfunctions", alias = "sfn")]
     StepFunctions {
@@ -231,6 +270,17 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::StepFunctions { dir, name, json } => cmd_stepfunctions(dir, name, json),
         Commands::Init { dir, yes } => cmd_init(dir, yes),
+        Commands::Replay {
+            dir,
+            index,
+            all,
+            last,
+            method,
+            path,
+            clear,
+            port,
+            json,
+        } => cmd_replay(dir, index, all, last, method, path, clear, port, json),
     }
 }
 
@@ -1324,6 +1374,199 @@ fn cmd_init(dir: PathBuf, accept_defaults: bool) -> anyhow::Result<()> {
     println!("   → lambdaform start        Start the dev server");
     println!("   → lambdaform validate     Check your Terraform files");
     println!("   → lambdaform config       View parsed configuration\n");
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_replay(
+    dir: PathBuf,
+    index: Option<usize>,
+    all: bool,
+    last: Option<usize>,
+    method_filter: Option<String>,
+    path_filter: Option<String>,
+    clear: bool,
+    port_override: Option<u16>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use lambdaform::history;
+
+    let history_path = dir.join(".lambdaform").join("history.jsonl");
+
+    if clear {
+        if history_path.exists() {
+            std::fs::remove_file(&history_path)?;
+            println!("🗑️  Cleared request history");
+        } else {
+            println!("No history file found");
+        }
+        return Ok(());
+    }
+
+    if !history_path.exists() {
+        println!("No request history found at {}", history_path.display());
+        println!("\nHistory is recorded automatically when you run `lambdaform start`.");
+        println!("Try making some requests first, then use `lambdaform replay` to review them.");
+        return Ok(());
+    }
+
+    let mut entries = history::load_history(&history_path)?;
+
+    if entries.is_empty() {
+        println!("History file is empty");
+        return Ok(());
+    }
+
+    // Apply filters
+    if let Some(ref m) = method_filter {
+        let m_upper = m.to_uppercase();
+        entries.retain(|e| e.method == m_upper);
+    }
+    if let Some(ref p) = path_filter {
+        entries.retain(|e| e.path.starts_with(p.as_str()));
+    }
+
+    // Apply --last
+    if let Some(n) = last {
+        if entries.len() > n {
+            entries = entries.split_off(entries.len() - n);
+        }
+    }
+
+    // Replay a specific request
+    if let Some(idx) = index {
+        if idx == 0 || idx > entries.len() {
+            anyhow::bail!("Index {} out of range (1-{})", idx, entries.len());
+        }
+        let entry = &entries[idx - 1];
+        return replay_request(entry, port_override);
+    }
+
+    // Replay all
+    if all {
+        println!("🔁 Replaying {} requests...\n", entries.len());
+        for (i, entry) in entries.iter().enumerate() {
+            println!("--- Request {} ---", i + 1);
+            if let Err(e) = replay_request(entry, port_override) {
+                println!("  ❌ Error: {}", e);
+            }
+            println!();
+        }
+        return Ok(());
+    }
+
+    // Default: list history
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else {
+        println!(
+            "📋 Request History ({} entries) — {}\n",
+            entries.len(),
+            history_path.display()
+        );
+        for (i, entry) in entries.iter().enumerate() {
+            println!("  {}", history::format_entry(entry, i + 1));
+        }
+        println!("\n  Replay a request:  lambdaform replay -n <index>");
+        println!("  Replay all:        lambdaform replay --all");
+        println!("  Filter by method:  lambdaform replay -m POST");
+        println!("  Clear history:     lambdaform replay --clear");
+    }
+
+    Ok(())
+}
+
+fn replay_request(
+    entry: &lambdaform::history::HistoryEntry,
+    port_override: Option<u16>,
+) -> anyhow::Result<()> {
+    let port = port_override.unwrap_or(entry.port);
+    let query_str = entry
+        .query
+        .as_ref()
+        .filter(|q| !q.is_empty())
+        .map(|q| {
+            format!(
+                "?{}",
+                q.iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join("&")
+            )
+        })
+        .unwrap_or_default();
+
+    let url = format!("http://127.0.0.1:{}{}{}", port, entry.path, query_str);
+    println!("  → {} {} (fn: {})", entry.method, url, entry.function);
+
+    // Build curl command
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-s",
+        "-w",
+        "\n%{http_code}\n%{time_total}",
+        "-X",
+        &entry.method,
+    ]);
+
+    // Add headers (skip host, content-length)
+    if let Some(ref headers) = entry.headers {
+        for (k, v) in headers {
+            let lower = k.to_lowercase();
+            if lower != "host" && lower != "content-length" {
+                cmd.args(["-H", &format!("{}: {}", k, v)]);
+            }
+        }
+    }
+
+    // Add body
+    if let Some(ref body) = entry.body {
+        cmd.args(["-d", body]);
+    }
+
+    cmd.arg(&url);
+
+    match cmd.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.trim().rsplitn(3, '\n').collect();
+            // lines[0] = time_total, lines[1] = status code, lines[2] = body
+            let (time_str, status_str, body) = match lines.len() {
+                3 => (lines[0], lines[1], lines[2]),
+                2 => (lines[0], lines[1], ""),
+                _ => ("0", "0", stdout.trim()),
+            };
+            let status: u16 = status_str.parse().unwrap_or(0);
+            let time_ms = time_str.parse::<f64>().unwrap_or(0.0) * 1000.0;
+
+            let icon = if (200..300).contains(&status) {
+                "✅"
+            } else if (400..500).contains(&status) {
+                "⚠️"
+            } else {
+                "❌"
+            };
+
+            let display_body = if body.len() > 200 {
+                format!("{}...", &body[..200])
+            } else {
+                body.to_string()
+            };
+            println!(
+                "  ← {} {} [{:.0}ms] {}",
+                icon, status, time_ms, display_body
+            );
+
+            if status == 0 {
+                println!("    (Is `lambdaform start` running on port {}?)", port);
+            }
+        }
+        Err(e) => {
+            println!("  ← ❌ Failed to run curl: {}", e);
+            println!("    (Make sure curl is installed)");
+        }
+    }
 
     Ok(())
 }
