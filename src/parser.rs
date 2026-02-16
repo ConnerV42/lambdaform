@@ -19,7 +19,7 @@ use crate::config::*;
 /// 3. `*.auto.tfvars` (auto-loaded, alphabetical)
 #[derive(Debug, Default, Clone)]
 pub struct VariableResolver {
-    variables: HashMap<String, String>,
+    pub(crate) variables: HashMap<String, String>,
 }
 
 impl VariableResolver {
@@ -178,25 +178,326 @@ pub fn parse_terraform_dir_with_var_files(
     dir: &Path,
     var_files: &[std::path::PathBuf],
 ) -> Result<LambdaformConfig> {
+    parse_terraform_dir_recursive(dir, var_files, 0)
+}
+
+/// Recursively parse Terraform files, following local module sources.
+/// `depth` prevents infinite recursion from circular module references.
+fn parse_terraform_dir_recursive(
+    dir: &Path,
+    var_files: &[std::path::PathBuf],
+    depth: u32,
+) -> Result<LambdaformConfig> {
+    const MAX_MODULE_DEPTH: u32 = 10;
+    if depth > MAX_MODULE_DEPTH {
+        tracing::warn!(
+            "Module nesting depth exceeded {} at {}, skipping",
+            MAX_MODULE_DEPTH,
+            dir.display()
+        );
+        return Ok(LambdaformConfig::default());
+    }
+
     let resolver = VariableResolver::from_dir_with_var_files(dir, var_files)?;
 
     let mut config = LambdaformConfig::default();
 
-    // Find all .tf files
+    // Collect .tf files (don't recurse into subdirs — modules handle that)
+    let mut tf_files: Vec<std::path::PathBuf> = Vec::new();
     for entry in WalkDir::new(dir)
-        .max_depth(2) // Don't recurse too deep
+        .max_depth(1)
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "tf") {
-            tracing::debug!("Parsing: {}", path.display());
-            parse_tf_file(path, &mut config, &resolver)?;
+            tf_files.push(path.to_path_buf());
+        }
+    }
+
+    for path in &tf_files {
+        tracing::debug!("Parsing: {}", path.display());
+        parse_tf_file(path, &mut config, &resolver)?;
+    }
+
+    // Scan for module blocks and recursively parse local modules
+    let modules = collect_module_blocks(dir, &resolver)?;
+    for module in modules {
+        // Only follow local source paths (starting with ./ or ../ or no protocol)
+        if is_local_module_source(&module.source) {
+            let module_dir = dir.join(&module.source);
+            let module_dir = match module_dir.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        "Module '{}' source '{}' not found: {}",
+                        module.name,
+                        module.source,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                "Parsing module '{}' from {}",
+                module.name,
+                module_dir.display()
+            );
+
+            // Build a resolver for the module with passed-in variable values
+            let mut module_config = parse_module_dir(&module_dir, &module.variables, depth + 1)?;
+
+            // Prefix resource names with module name for namespacing
+            // This allows referencing module.X.resource_name in the parent
+            let prefix = &module.name;
+            for func in &mut module_config.functions {
+                func.resource_name = format!("{}.{}", prefix, func.resource_name);
+            }
+            for gw in &mut module_config.gateways {
+                gw.resource_name = format!("{}.{}", prefix, gw.resource_name);
+            }
+            for layer in &mut module_config.layers {
+                layer.resource_name = format!("{}.{}", prefix, layer.resource_name);
+            }
+            for sm in &mut module_config.state_machines {
+                sm.resource_name = format!("{}.{}", prefix, sm.resource_name);
+            }
+            for table in &mut module_config.dynamodb_tables {
+                table.resource_name = format!("{}.{}", prefix, table.resource_name);
+            }
+            for queue in &mut module_config.sqs_queues {
+                queue.resource_name = format!("{}.{}", prefix, queue.resource_name);
+            }
+            for topic in &mut module_config.sns_topics {
+                topic.resource_name = format!("{}.{}", prefix, topic.resource_name);
+            }
+            for esm in &mut module_config.event_source_mappings {
+                esm.resource_name = format!("{}.{}", prefix, esm.resource_name);
+            }
+
+            // Merge module config into parent
+            config.functions.extend(module_config.functions);
+            config.gateways.extend(module_config.gateways);
+            config.layers.extend(module_config.layers);
+            config.state_machines.extend(module_config.state_machines);
+            config.dynamodb_tables.extend(module_config.dynamodb_tables);
+            config.sqs_queues.extend(module_config.sqs_queues);
+            config.sns_topics.extend(module_config.sns_topics);
+            config
+                .event_source_mappings
+                .extend(module_config.event_source_mappings);
+        } else {
+            tracing::debug!(
+                "Skipping remote module '{}' (source: {})",
+                module.name,
+                module.source
+            );
         }
     }
 
     Ok(config)
+}
+
+/// A parsed Terraform module block
+#[derive(Debug)]
+struct ModuleBlock {
+    name: String,
+    source: String,
+    variables: HashMap<String, String>,
+}
+
+/// Check if a module source is local (relative path)
+fn is_local_module_source(source: &str) -> bool {
+    source.starts_with("./") || source.starts_with("../")
+}
+
+/// Parse a module directory with variable overrides from the parent module block
+fn parse_module_dir(
+    dir: &Path,
+    variable_overrides: &HashMap<String, String>,
+    depth: u32,
+) -> Result<LambdaformConfig> {
+    const MAX_MODULE_DEPTH: u32 = 10;
+    if depth > MAX_MODULE_DEPTH {
+        tracing::warn!(
+            "Module nesting depth exceeded {} at {}, skipping",
+            MAX_MODULE_DEPTH,
+            dir.display()
+        );
+        return Ok(LambdaformConfig::default());
+    }
+
+    // Build a resolver that includes the parent's variable overrides
+    let mut resolver = VariableResolver::from_dir(dir)?;
+    // Override with values passed from the module block
+    for (k, v) in variable_overrides {
+        resolver.variables.insert(k.clone(), v.clone());
+    }
+
+    let mut config = LambdaformConfig::default();
+
+    // Parse .tf files in the module directory (depth 1 only)
+    for entry in WalkDir::new(dir)
+        .max_depth(1)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "tf") {
+            tracing::debug!("Parsing module file: {}", path.display());
+            parse_tf_file(path, &mut config, &resolver)?;
+        }
+    }
+
+    // Resolve source_path relative to module directory
+    for func in &mut config.functions {
+        if let Some(ref sp) = func.source_path {
+            if sp.is_relative() {
+                func.source_path = Some(dir.join(sp));
+            }
+        }
+    }
+    for layer in &mut config.layers {
+        if let Some(ref sp) = layer.source_path {
+            if sp.is_relative() {
+                layer.source_path = Some(dir.join(sp));
+            }
+        }
+    }
+
+    // Recursively handle nested modules
+    let modules = collect_module_blocks(dir, &resolver)?;
+    for module in modules {
+        if is_local_module_source(&module.source) {
+            let module_dir = dir.join(&module.source);
+            let module_dir = match module_dir.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        "Nested module '{}' source '{}' not found: {}",
+                        module.name,
+                        module.source,
+                        e
+                    );
+                    continue;
+                }
+            };
+            let mut nested = parse_module_dir(&module_dir, &module.variables, depth + 1)?;
+            let prefix = &module.name;
+            for func in &mut nested.functions {
+                func.resource_name = format!("{}.{}", prefix, func.resource_name);
+            }
+            for gw in &mut nested.gateways {
+                gw.resource_name = format!("{}.{}", prefix, gw.resource_name);
+            }
+            for layer in &mut nested.layers {
+                layer.resource_name = format!("{}.{}", prefix, layer.resource_name);
+            }
+            for sm in &mut nested.state_machines {
+                sm.resource_name = format!("{}.{}", prefix, sm.resource_name);
+            }
+            for table in &mut nested.dynamodb_tables {
+                table.resource_name = format!("{}.{}", prefix, table.resource_name);
+            }
+            for queue in &mut nested.sqs_queues {
+                queue.resource_name = format!("{}.{}", prefix, queue.resource_name);
+            }
+            for topic in &mut nested.sns_topics {
+                topic.resource_name = format!("{}.{}", prefix, topic.resource_name);
+            }
+            for esm in &mut nested.event_source_mappings {
+                esm.resource_name = format!("{}.{}", prefix, esm.resource_name);
+            }
+            config.functions.extend(nested.functions);
+            config.gateways.extend(nested.gateways);
+            config.layers.extend(nested.layers);
+            config.state_machines.extend(nested.state_machines);
+            config.dynamodb_tables.extend(nested.dynamodb_tables);
+            config.sqs_queues.extend(nested.sqs_queues);
+            config.sns_topics.extend(nested.sns_topics);
+            config
+                .event_source_mappings
+                .extend(nested.event_source_mappings);
+        }
+    }
+
+    Ok(config)
+}
+
+/// Scan .tf files in a directory for `module` blocks and extract source + variables
+fn collect_module_blocks(dir: &Path, resolver: &VariableResolver) -> Result<Vec<ModuleBlock>> {
+    let mut modules = Vec::new();
+
+    for entry in WalkDir::new(dir)
+        .max_depth(1)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "tf") {
+            let content = fs::read_to_string(path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let body: hcl::Body = match hcl::from_str(&content) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            for block in body.blocks() {
+                if block.identifier.to_string() == "module" {
+                    if let Some(label) = block.labels.first() {
+                        let name = label_to_string(label);
+                        let source = get_string_attr_resolved(&block.body, "source", resolver);
+
+                        if let Some(source) = source {
+                            // Collect variable assignments from the module block
+                            let mut variables = HashMap::new();
+                            for attr in block.body.attributes() {
+                                let key = attr.key.to_string();
+                                if key == "source"
+                                    || key == "providers"
+                                    || key == "depends_on"
+                                    || key == "count"
+                                    || key == "for_each"
+                                {
+                                    continue; // Skip meta-arguments
+                                }
+                                if let Some(val) = expr_to_string(&attr.expr) {
+                                    variables.insert(key, resolver.resolve(&val));
+                                } else if let hcl::Expression::Traversal(traversal) = &attr.expr {
+                                    // Handle var.xxx references passed to module
+                                    let parts: Vec<String> =
+                                        std::iter::once(traversal.expr.to_string())
+                                            .chain(traversal.operators.iter().map(|op| match op {
+                                                hcl::TraversalOperator::GetAttr(ident) => {
+                                                    ident.to_string()
+                                                }
+                                                _ => String::new(),
+                                            }))
+                                            .collect();
+                                    let trav_str = parts.join(".");
+                                    if let Some(resolved) = resolver.resolve_traversal(&trav_str) {
+                                        variables.insert(key, resolved);
+                                    }
+                                }
+                            }
+
+                            modules.push(ModuleBlock {
+                                name,
+                                source,
+                                variables,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(modules)
 }
 
 /// Intermediate structs for collecting API Gateway resources before resolving
@@ -2188,5 +2489,46 @@ resource "aws_lambda_function" "api" {
             .get("QUEUE_ARN")
             .unwrap()
             .contains("ingest-queue-dev"));
+    }
+
+    #[test]
+    fn test_local_module_support() {
+        let fixture_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/local-modules");
+
+        let config = parse_terraform_dir(&fixture_dir).unwrap();
+
+        // Root-level function should be present
+        let root_func = config
+            .functions
+            .iter()
+            .find(|f| f.resource_name == "root_handler")
+            .expect("root_handler should exist");
+        assert_eq!(root_func.function_name, "root-handler");
+
+        // Module function should be present with prefixed resource name
+        let module_func = config
+            .functions
+            .iter()
+            .find(|f| f.resource_name == "api.api_handler")
+            .expect("api.api_handler should exist from module");
+        // Variable override: environment=dev from parent, not default "prod"
+        assert_eq!(module_func.function_name, "dev-api-handler");
+        assert_eq!(
+            module_func.environment.get("TABLE_NAME"),
+            Some(&"users-table".to_string())
+        );
+        assert_eq!(
+            module_func.environment.get("ENVIRONMENT"),
+            Some(&"dev".to_string())
+        );
+
+        // DynamoDB table from module should be present
+        let table = config
+            .dynamodb_tables
+            .iter()
+            .find(|t| t.resource_name == "api.data")
+            .expect("api.data table should exist from module");
+        assert_eq!(table.name, "dev-data");
     }
 }
