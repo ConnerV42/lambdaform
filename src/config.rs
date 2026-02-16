@@ -299,8 +299,9 @@ impl Runtime {
         )
     }
 
+    /// Returns true for custom/provided runtimes (Go, Rust, or any compiled binary)
     #[allow(dead_code)]
-    pub fn is_go(&self) -> bool {
+    pub fn is_custom_runtime(&self) -> bool {
         matches!(
             self,
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023
@@ -449,12 +450,12 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_is_go() {
-        assert!(Runtime::Go1.is_go());
-        assert!(Runtime::ProvidedAl2.is_go());
-        assert!(Runtime::ProvidedAl2023.is_go());
-        assert!(!Runtime::Nodejs20.is_go());
-        assert!(!Runtime::Python312.is_go());
+    fn test_runtime_is_custom_runtime() {
+        assert!(Runtime::Go1.is_custom_runtime());
+        assert!(Runtime::ProvidedAl2.is_custom_runtime());
+        assert!(Runtime::ProvidedAl2023.is_custom_runtime());
+        assert!(!Runtime::Nodejs20.is_custom_runtime());
+        assert!(!Runtime::Python312.is_custom_runtime());
     }
 
     #[test]

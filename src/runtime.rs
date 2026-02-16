@@ -159,6 +159,17 @@ pub struct DebugOptions {
     pub break_on_start: bool,
 }
 
+/// Type of custom runtime detected in source directory
+#[derive(Debug, Clone, PartialEq)]
+enum CustomRuntimeType {
+    /// Go project (go.mod found)
+    Go,
+    /// Rust project (Cargo.toml found)
+    Rust,
+    /// Pre-compiled bootstrap binary
+    Prebuilt,
+}
+
 /// Executor for a Lambda function
 pub struct FunctionExecutor {
     config: LambdaConfig,
@@ -193,6 +204,134 @@ impl FunctionExecutor {
     pub fn with_layer_paths(mut self, layer_paths: Vec<std::path::PathBuf>) -> Self {
         self.layer_paths = layer_paths;
         self
+    }
+
+    /// Detect what kind of custom runtime project this is
+    fn detect_custom_runtime_type(&self) -> CustomRuntimeType {
+        let source = &self.source_dir;
+        if source.join("Cargo.toml").exists() {
+            CustomRuntimeType::Rust
+        } else if source.join("go.mod").exists() || source.join("main.go").exists() {
+            CustomRuntimeType::Go
+        } else if source.join("bootstrap").exists() {
+            CustomRuntimeType::Prebuilt
+        } else {
+            // Default to prebuilt — user may have a bootstrap elsewhere
+            tracing::warn!(
+                "No Cargo.toml, go.mod, or bootstrap found in {}. Assuming prebuilt bootstrap.",
+                source.display()
+            );
+            CustomRuntimeType::Prebuilt
+        }
+    }
+
+    /// Build a Rust Lambda binary. Returns path to the compiled bootstrap.
+    async fn build_rust(&self) -> Result<std::path::PathBuf> {
+        let source_dir = self.source_dir.canonicalize().with_context(|| {
+            format!("Source directory not found: {}", self.source_dir.display())
+        })?;
+
+        // Read Cargo.toml to find the binary name
+        let cargo_toml = source_dir.join("Cargo.toml");
+        let cargo_content =
+            std::fs::read_to_string(&cargo_toml).context("Failed to read Cargo.toml")?;
+
+        // Extract package name for binary detection
+        let package_name = cargo_content
+            .lines()
+            .find(|l| l.trim().starts_with("name"))
+            .and_then(|l| l.split('=').nth(1))
+            .map(|s| s.trim().trim_matches('"').to_string());
+
+        // Check if build is needed by comparing source modification times
+        // Look for binary in target/release (prefer release) or target/debug
+        let release_dir = source_dir.join("target").join("release");
+        let debug_dir = source_dir.join("target").join("debug");
+
+        // The binary could be named "bootstrap" (common Lambda convention) or the package name
+        let possible_names: Vec<&str> = if let Some(ref name) = package_name {
+            vec!["bootstrap", name.as_str()]
+        } else {
+            vec!["bootstrap"]
+        };
+
+        // Find existing binary
+        let existing_binary = possible_names.iter().find_map(|name| {
+            let release_path = release_dir.join(name);
+            let debug_path = debug_dir.join(name);
+            if release_path.exists() {
+                Some(release_path)
+            } else if debug_path.exists() {
+                Some(debug_path)
+            } else {
+                None
+            }
+        });
+
+        // Check if rebuild needed
+        let needs_build = if let Some(ref bin_path) = existing_binary {
+            let bin_modified = std::fs::metadata(bin_path)?.modified()?;
+            // Check Cargo.toml and src/ directory for changes
+            let mut needs = false;
+            let check_files = vec![source_dir.join("Cargo.toml"), source_dir.join("Cargo.lock")];
+            for path in &check_files {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    if let Ok(modified) = meta.modified() {
+                        if modified > bin_modified {
+                            needs = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Check all .rs files in src/
+            if !needs {
+                needs = check_dir_newer(&source_dir.join("src"), bin_modified);
+            }
+            needs
+        } else {
+            true
+        };
+
+        if needs_build {
+            tracing::info!("Building Rust Lambda in {}", source_dir.display());
+
+            // Use release build for Lambda (matches production behavior)
+            let output = Command::new("cargo")
+                .args(["build", "--release"])
+                .current_dir(&source_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .context("Failed to run `cargo build`. Is Rust installed?")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Rust build failed:\n{}", stderr);
+            }
+            tracing::info!("Rust build complete");
+        }
+
+        // Find the built binary (prefer "bootstrap" name, then package name)
+        for name in &possible_names {
+            let path = release_dir.join(name);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+        // Also check debug dir if release doesn't exist
+        for name in &possible_names {
+            let path = debug_dir.join(name);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        anyhow::bail!(
+            "Rust build succeeded but no binary found. Expected 'bootstrap' or '{}' in target/release/",
+            package_name.unwrap_or_else(|| "<package-name>".to_string())
+        )
     }
 
     /// Build environment variables with layer paths added to NODE_PATH/PYTHONPATH
@@ -333,7 +472,7 @@ impl FunctionExecutor {
             }
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
                 // Go authorizer: send auth event directly
-                self.invoke_go_with_rie(&serde_json::to_value(&event)?)
+                self.invoke_custom_with_rie(&serde_json::to_value(&event)?)
                     .await?
             }
             _ => {
@@ -530,6 +669,38 @@ except Exception as e:
         anyhow::bail!("No valid response from authorizer Lambda")
     }
 
+    /// Build or locate the bootstrap binary for a custom runtime.
+    /// Detects project type (Rust, Go, prebuilt) and returns the binary path.
+    async fn build_custom_runtime(&self) -> Result<std::path::PathBuf> {
+        match self.detect_custom_runtime_type() {
+            CustomRuntimeType::Rust => self.build_rust().await,
+            CustomRuntimeType::Go => self.build_go().await,
+            CustomRuntimeType::Prebuilt => {
+                let bootstrap = self.source_dir.join("bootstrap");
+                if !bootstrap.exists() {
+                    anyhow::bail!(
+                        "No bootstrap binary found in {}. For custom runtimes, provide a compiled 'bootstrap' binary, or include Cargo.toml (Rust) or go.mod (Go) for automatic building.",
+                        self.source_dir.display()
+                    );
+                }
+                // Ensure it's executable
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let meta = std::fs::metadata(&bootstrap)?;
+                    if meta.permissions().mode() & 0o111 == 0 {
+                        tracing::warn!("bootstrap binary is not executable, fixing permissions");
+                        std::fs::set_permissions(
+                            &bootstrap,
+                            std::fs::Permissions::from_mode(meta.permissions().mode() | 0o755),
+                        )?;
+                    }
+                }
+                Ok(bootstrap.canonicalize()?)
+            }
+        }
+    }
+
     /// Build Go Lambda binary. Returns path to compiled binary.
     async fn build_go(&self) -> Result<std::path::PathBuf> {
         let source_dir = self.source_dir.canonicalize().with_context(|| {
@@ -582,13 +753,13 @@ except Exception as e:
         Ok(binary_path)
     }
 
-    /// Run a Go Lambda binary with a mini Runtime Interface Emulator.
+    /// Run a custom runtime binary (Go, Rust, or prebuilt) with a mini Runtime Interface Emulator.
     /// The binary polls GET /next for the event, then POSTs the response.
-    async fn invoke_go_with_rie(
+    async fn invoke_custom_with_rie(
         &self,
         event_json: &serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let binary_path = self.build_go().await?;
+        let binary_path = self.build_custom_runtime().await?;
 
         let request_id = uuid_simple();
         let event_bytes: Vec<u8> = serde_json::to_vec(event_json)?;
@@ -758,7 +929,7 @@ except Exception as e:
                 self.invoke_python_raw(&payload).await
             }
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
-                self.invoke_go_with_rie(&payload["event"]).await
+                self.invoke_custom_with_rie(&payload["event"]).await
             }
             _ => {
                 anyhow::bail!("Unsupported runtime: {:?}", self.config.runtime)
@@ -820,7 +991,7 @@ except Exception as e:
                 self.invoke_python(&payload).await
             }
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
-                self.invoke_go(&payload).await
+                self.invoke_custom_runtime(&payload).await
             }
             _ => {
                 anyhow::bail!("Unsupported runtime: {:?}", self.config.runtime)
@@ -1068,11 +1239,11 @@ except Exception as e:
         anyhow::bail!("No valid response from Lambda")
     }
 
-    /// Invoke Go function via Runtime Interface Emulator
-    async fn invoke_go(&self, payload: &serde_json::Value) -> Result<LambdaResponse> {
-        // For Go, the event is the API Gateway event directly (not wrapped in {event, context})
+    /// Invoke custom runtime function (Go, Rust, prebuilt) via Runtime Interface Emulator
+    async fn invoke_custom_runtime(&self, payload: &serde_json::Value) -> Result<LambdaResponse> {
+        // For custom runtimes, the event is the API Gateway event directly (not wrapped in {event, context})
         let event = &payload["event"];
-        let result = self.invoke_go_with_rie(event).await?;
+        let result = self.invoke_custom_with_rie(event).await?;
         let response: LambdaResponse = serde_json::from_value(result)?;
         Ok(response)
     }
@@ -1122,6 +1293,29 @@ pub fn parse_handler(handler: &str) -> Result<(&str, &str)> {
         anyhow::bail!("Invalid handler format: {}", handler);
     }
     Ok((parts[1], parts[0]))
+}
+
+/// Recursively check if any file in a directory is newer than the given time
+fn check_dir_newer(dir: &std::path::Path, than: std::time::SystemTime) -> bool {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if check_dir_newer(&path, than) {
+                return true;
+            }
+        } else if let Ok(meta) = path.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if modified > than {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Generate a simple UUID-like string
@@ -1314,5 +1508,117 @@ mod tests {
             "Expected timeout error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_detect_custom_runtime_rust() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-lambda\"\nversion = \"0.1.0\"",
+        )
+        .unwrap();
+        let config = LambdaConfig {
+            resource_name: "test".to_string(),
+            function_name: "rust-fn".to_string(),
+            handler: "bootstrap".to_string(),
+            runtime: Runtime::ProvidedAl2023,
+            source_path: None,
+            environment: HashMap::new(),
+            timeout: 30,
+            memory_size: 128,
+            layers: Vec::new(),
+        };
+        let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
+        assert_eq!(
+            executor.detect_custom_runtime_type(),
+            CustomRuntimeType::Rust
+        );
+    }
+
+    #[test]
+    fn test_detect_custom_runtime_go() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/lambda\n").unwrap();
+        let config = LambdaConfig {
+            resource_name: "test".to_string(),
+            function_name: "go-fn".to_string(),
+            handler: "bootstrap".to_string(),
+            runtime: Runtime::ProvidedAl2023,
+            source_path: None,
+            environment: HashMap::new(),
+            timeout: 30,
+            memory_size: 128,
+            layers: Vec::new(),
+        };
+        let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
+        assert_eq!(executor.detect_custom_runtime_type(), CustomRuntimeType::Go);
+    }
+
+    #[test]
+    fn test_detect_custom_runtime_prebuilt() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("bootstrap"), "#!/bin/sh\necho hello").unwrap();
+        let config = LambdaConfig {
+            resource_name: "test".to_string(),
+            function_name: "prebuilt-fn".to_string(),
+            handler: "bootstrap".to_string(),
+            runtime: Runtime::ProvidedAl2023,
+            source_path: None,
+            environment: HashMap::new(),
+            timeout: 30,
+            memory_size: 128,
+            layers: Vec::new(),
+        };
+        let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
+        assert_eq!(
+            executor.detect_custom_runtime_type(),
+            CustomRuntimeType::Prebuilt
+        );
+    }
+
+    #[test]
+    fn test_detect_custom_runtime_rust_takes_priority_over_bootstrap() {
+        let dir = TempDir::new().unwrap();
+        // Both Cargo.toml and bootstrap exist — Rust should take priority
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-lambda\"\nversion = \"0.1.0\"",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("bootstrap"), "binary").unwrap();
+        let config = LambdaConfig {
+            resource_name: "test".to_string(),
+            function_name: "rust-fn".to_string(),
+            handler: "bootstrap".to_string(),
+            runtime: Runtime::ProvidedAl2023,
+            source_path: None,
+            environment: HashMap::new(),
+            timeout: 30,
+            memory_size: 128,
+            layers: Vec::new(),
+        };
+        let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
+        assert_eq!(
+            executor.detect_custom_runtime_type(),
+            CustomRuntimeType::Rust
+        );
+    }
+
+    #[test]
+    fn test_check_dir_newer() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+
+        // File just written should be newer than 10 seconds ago
+        assert!(check_dir_newer(&src, old_time));
+
+        // Future time — nothing should be newer
+        let future_time = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        assert!(!check_dir_newer(&src, future_time));
     }
 }
