@@ -1,0 +1,14 @@
+[book]
+authors = ["Conner Verret"]
+language = "en"
+src = "src"
+title = "Lambdaform Documentation"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/ConnerV42/lambdaform"
+edit-url-template = "https://github.com/ConnerV42/lambdaform/edit/main/docs/{path}"

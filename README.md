@@ -1,5 +1,7 @@
 # 🚀 Lambdaform
 
+[![Documentation](https://img.shields.io/badge/docs-lambdaform-blue)](https://connerv42.github.io/lambdaform/)
+
 > The only local Lambda tool that reads your Terraform
 
 **Lambdaform** is a Terraform-native local development server for AWS Lambda + API Gateway. No CloudFormation. No Docker. No LocalStack account. Just your Terraform files and your code.
