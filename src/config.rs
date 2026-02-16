@@ -274,6 +274,20 @@ impl Runtime {
         }
     }
 
+    pub fn as_str(&self) -> &str {
+        match self {
+            Runtime::Nodejs18 => "nodejs18.x",
+            Runtime::Nodejs20 => "nodejs20.x",
+            Runtime::Python310 => "python3.10",
+            Runtime::Python311 => "python3.11",
+            Runtime::Python312 => "python3.12",
+            Runtime::Go1 => "go1.x",
+            Runtime::ProvidedAl2 => "provided.al2",
+            Runtime::ProvidedAl2023 => "provided.al2023",
+            Runtime::Unknown(s) => s.as_str(),
+        }
+    }
+
     pub fn is_nodejs(&self) -> bool {
         matches!(self, Runtime::Nodejs18 | Runtime::Nodejs20)
     }

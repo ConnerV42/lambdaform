@@ -240,3 +240,47 @@ fn test_parse_http_api_fixture() {
     assert!(!config.functions.is_empty());
     assert!(!config.gateways.is_empty());
 }
+
+#[test]
+fn test_init_generates_config() {
+    use assert_cmd::Command;
+    use std::fs;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Copy a fixture's .tf files into the temp dir
+    let fixture = fixture_dir("simple-node");
+    for entry in fs::read_dir(&fixture).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_string_lossy().ends_with(".tf") {
+            fs::copy(entry.path(), tmp.path().join(entry.file_name())).unwrap();
+        }
+    }
+
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["init", "--dir", tmp.path().to_str().unwrap(), "--yes"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Created"))
+        .stdout(predicates::str::contains("lambdaform.yaml"));
+
+    let config_path = tmp.path().join("lambdaform.yaml");
+    assert!(config_path.exists());
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("port: 3000"));
+    assert!(content.contains("watch: true"));
+}
+
+#[test]
+fn test_init_no_tf_files() {
+    use assert_cmd::Command;
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["init", "--dir", tmp.path().to_str().unwrap(), "--yes"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No .tf files found"));
+}

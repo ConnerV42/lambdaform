@@ -132,6 +132,17 @@ enum Commands {
         function: Option<String>,
     },
 
+    /// Initialize a new Lambdaform project (generates lambdaform.yaml)
+    Init {
+        /// Directory to initialize
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+
+        /// Accept all defaults without prompting
+        #[arg(short, long)]
+        yes: bool,
+    },
+
     /// Visualize Step Functions state machines (read-only)
     #[command(name = "stepfunctions", alias = "sfn")]
     StepFunctions {
@@ -219,6 +230,7 @@ fn main() -> anyhow::Result<()> {
             ))
         }
         Commands::StepFunctions { dir, name, json } => cmd_stepfunctions(dir, name, json),
+        Commands::Init { dir, yes } => cmd_init(dir, yes),
     }
 }
 
@@ -1068,6 +1080,250 @@ fn cmd_stepfunctions(dir: PathBuf, name: Option<String>, json_output: bool) -> a
         }
         println!();
     }
+
+    Ok(())
+}
+
+fn cmd_init(dir: PathBuf, accept_defaults: bool) -> anyhow::Result<()> {
+    use console::style;
+    use dialoguer::{Confirm, Input, MultiSelect};
+    use std::collections::HashSet;
+
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let config_path = dir.join("lambdaform.yaml");
+
+    println!("\n{}  Lambdaform Init\n", style("⚡").bold());
+
+    // Check for existing config
+    if config_path.exists() {
+        if accept_defaults {
+            println!(
+                "{}  lambdaform.yaml already exists — overwriting (--yes mode)",
+                style("⚠").yellow()
+            );
+        } else {
+            let overwrite = Confirm::new()
+                .with_prompt("lambdaform.yaml already exists. Overwrite?")
+                .default(false)
+                .interact()?;
+            if !overwrite {
+                println!("Aborted.");
+                return Ok(());
+            }
+        }
+    }
+
+    // Detect project structure
+    println!("{}  Scanning {} ...", style("🔍").bold(), dir.display());
+
+    let tf_files: Vec<_> = WalkDir::new(&dir)
+        .max_depth(5)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy();
+            (name.ends_with(".tf") || name.ends_with(".tf.json"))
+                && !e.path().components().any(|c| {
+                    let s = c.as_os_str().to_string_lossy();
+                    s == ".terraform" || s == "node_modules" || s == ".git"
+                })
+        })
+        .collect();
+
+    if tf_files.is_empty() {
+        println!(
+            "\n{}  No .tf files found in {}",
+            style("⚠").yellow(),
+            dir.display()
+        );
+        println!("   Run this command in a directory with Terraform files,");
+        println!("   or use --dir to point to one.\n");
+        return Ok(());
+    }
+
+    println!(
+        "   Found {} Terraform file(s)",
+        style(tf_files.len()).cyan()
+    );
+
+    // Try parsing to detect functions and gateways
+    let tf_dir = dir.clone();
+    let parse_result = parser::parse_terraform_dir(&tf_dir);
+
+    let mut detected_runtimes: HashSet<String> = HashSet::new();
+    let mut function_count = 0;
+    let mut gateway_count = 0;
+    let mut has_websocket = false;
+    let mut has_dynamodb = false;
+    let mut has_sqs_sns = false;
+
+    if let Ok(ref config) = parse_result {
+        function_count = config.functions.len();
+        gateway_count = config.gateways.len();
+
+        for f in &config.functions {
+            detected_runtimes.insert(f.runtime.as_str().to_string());
+        }
+        for gw in &config.gateways {
+            if matches!(gw.api_type, config::ApiType::WebSocket) {
+                has_websocket = true;
+            }
+        }
+        has_dynamodb = !config.dynamodb_tables.is_empty();
+        has_sqs_sns = !config.sqs_queues.is_empty() || !config.sns_topics.is_empty();
+    }
+
+    // Print detection summary
+    println!(
+        "   Found {} Lambda function(s)",
+        style(function_count).cyan()
+    );
+    println!(
+        "   Found {} API Gateway(s){}",
+        style(gateway_count).cyan(),
+        if has_websocket {
+            " (including WebSocket)"
+        } else {
+            ""
+        }
+    );
+    if !detected_runtimes.is_empty() {
+        let mut runtimes: Vec<_> = detected_runtimes.iter().cloned().collect();
+        runtimes.sort();
+        println!("   Runtimes: {}", style(runtimes.join(", ")).cyan());
+    }
+    if has_dynamodb {
+        println!("   DynamoDB tables detected");
+    }
+    if has_sqs_sns {
+        println!("   SQS/SNS triggers detected");
+    }
+
+    if let Err(ref e) = parse_result {
+        println!("\n{}  Parse warning: {}", style("⚠").yellow(), e);
+        println!("   lambdaform.yaml will still be generated with defaults.\n");
+    }
+
+    println!();
+
+    // Collect config values
+    let port: u16 = if accept_defaults {
+        3000
+    } else {
+        Input::new()
+            .with_prompt("Server port")
+            .default(3000u16)
+            .interact_text()?
+    };
+
+    let watch: bool = if accept_defaults {
+        true
+    } else {
+        Confirm::new()
+            .with_prompt("Enable hot reload?")
+            .default(true)
+            .interact()?
+    };
+
+    // Ask about optional features
+    let mut enable_debug_node = false;
+    let mut enable_debug_python = false;
+    let mut env_vars: Vec<(String, String)> = Vec::new();
+
+    if !accept_defaults {
+        let has_node = detected_runtimes.iter().any(|r| r.contains("nodejs"));
+        let has_python = detected_runtimes.iter().any(|r| r.contains("python"));
+
+        // Feature selection
+        let mut feature_options = vec!["Add environment variables"];
+        if has_node {
+            feature_options.push("Enable Node.js debugger");
+        }
+        if has_python {
+            feature_options.push("Enable Python debugger");
+        }
+
+        let features = MultiSelect::new()
+            .with_prompt("Optional features (space to select, enter to confirm)")
+            .items(&feature_options)
+            .interact()?;
+
+        for &idx in &features {
+            match feature_options[idx] {
+                "Add environment variables" => {
+                    println!("  Enter environment variables (empty name to stop):");
+                    loop {
+                        let key: String = Input::new()
+                            .with_prompt("  Variable name")
+                            .allow_empty(true)
+                            .interact_text()?;
+                        if key.is_empty() {
+                            break;
+                        }
+                        let val: String = Input::new()
+                            .with_prompt(format!("  Value for {}", key))
+                            .interact_text()?;
+                        env_vars.push((key, val));
+                    }
+                }
+                "Enable Node.js debugger" => enable_debug_node = true,
+                "Enable Python debugger" => enable_debug_python = true,
+                _ => {}
+            }
+        }
+    }
+
+    // Generate YAML
+    let mut yaml = String::new();
+    yaml.push_str("# Lambdaform project configuration\n");
+    yaml.push_str("# Docs: https://github.com/ConnerV42/lambdaform#configuration\n\n");
+
+    yaml.push_str(&format!("port: {}\n", port));
+    yaml.push_str(&format!("watch: {}\n", watch));
+
+    if !env_vars.is_empty() {
+        yaml.push_str("\nenvironment:\n");
+        for (k, v) in &env_vars {
+            yaml.push_str(&format!("  {}: \"{}\"\n", k, v.replace('"', "\\\"")));
+        }
+    }
+
+    if enable_debug_node || enable_debug_python {
+        yaml.push_str("\ndebug:\n");
+        if enable_debug_node {
+            yaml.push_str("  nodejs: true\n");
+        }
+        if enable_debug_python {
+            yaml.push_str("  python: true\n");
+        }
+    }
+
+    // Add commented-out function override example if functions exist
+    if function_count > 0 {
+        yaml.push_str("\n# Per-function overrides (uncomment and customize):\n");
+        yaml.push_str("# functions:\n");
+        if let Ok(ref config) = parse_result {
+            if let Some(f) = config.functions.first() {
+                yaml.push_str(&format!("#   {}:\n", f.resource_name));
+                yaml.push_str("#     environment:\n");
+                yaml.push_str("#       MY_VAR: \"my-value\"\n");
+                yaml.push_str("#     timeout: 30\n");
+            }
+        }
+    }
+
+    // Write the file
+    std::fs::write(&config_path, &yaml)?;
+
+    println!(
+        "{}  Created {}",
+        style("✅").green(),
+        style(config_path.display()).bold()
+    );
+    println!("\n   Next steps:");
+    println!("   → lambdaform start        Start the dev server");
+    println!("   → lambdaform validate     Check your Terraform files");
+    println!("   → lambdaform config       View parsed configuration\n");
 
     Ok(())
 }
