@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.6.0 — Developer Experience (2026-02-16)
+
+**New features:**
+- Terraform variable resolution from `.tfvars` files (`--var-file` CLI flag)
+- Terraform module support (local modules)
+- Better error messages with source location (file:line:col for parse errors)
+- `lambdaform init` — guided project setup with structure detection and `--yes` flag
+- `lambdaform replay` — request history recording to JSONL, replay via native HTTP client, filtering
+- Structured JSON logging mode (`--json-log` flag / `json_log` config)
+- Environment variable and locals interpolation (`${local.xxx}`, `${var.name}`)
+- Terminal UI — optional ratatui dashboard with live request log, color-coded methods/status/timing, keyboard navigation (feature-gated)
+
+**Bug fixes:**
+- Fixed replay curl dependency — replaced shell-out with native hyper HTTP client
+- Fixed 4 bugs found during Civic Scanner v2 dogfooding
+
 ## v0.5.0 — Production Hardening (2026-02-15)
 
 **Bug fixes:**
