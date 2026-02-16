@@ -44,6 +44,10 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
+        /// Output logs as structured JSON (for log aggregators)
+        #[arg(long)]
+        json_log: bool,
+
         /// Enable Node.js debugger (--inspect-brk)
         #[arg(long)]
         debug: bool,
@@ -202,18 +206,28 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging — verbose flag sets DEBUG level
+    // Initialize logging — verbose flag sets DEBUG level, json_log enables structured output
     let verbose = matches!(&cli.command, Commands::Start { verbose: true, .. });
+    let json_log = matches!(&cli.command, Commands::Start { json_log: true, .. });
     let default_level = if verbose {
         tracing::Level::DEBUG
     } else {
         tracing::Level::INFO
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive(default_level.into()),
-        )
-        .init();
+    let env_filter =
+        tracing_subscriber::EnvFilter::from_default_env().add_directive(default_level.into());
+
+    if json_log {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(env_filter)
+            .with_target(true)
+            .with_thread_ids(false)
+            .with_span_list(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
 
     match cli.command {
         Commands::Start {
@@ -221,6 +235,7 @@ fn main() -> anyhow::Result<()> {
             dir,
             watch,
             verbose: _,
+            json_log: _,
             debug,
             debug_port,
             debug_python,

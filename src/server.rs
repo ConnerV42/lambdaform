@@ -544,6 +544,11 @@ async fn handle_request(
         .to_string();
 
     tracing::info!(
+        http.method = %method,
+        http.path = %path,
+        http.query = %query_str,
+        http.body_bytes = body_size,
+        http.content_type = %content_type,
         "→ {} {}{}{}",
         method,
         path,
@@ -761,6 +766,12 @@ async fn handle_request(
             };
 
             tracing::info!(
+                http.status = status.as_u16(),
+                http.method = %method,
+                http.path = %path,
+                http.duration_ms = duration.as_millis() as u64,
+                http.response_bytes = response_size,
+                lambda.function = %function.function_name,
                 "← {} {} {} {} [{}] → {}",
                 status_icon,
                 status.as_u16(),

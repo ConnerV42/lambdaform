@@ -35,6 +35,9 @@ pub struct ProjectConfig {
     /// Debug configuration
     pub debug: Option<DebugConfig>,
 
+    /// Enable structured JSON log output (default: false)
+    pub json_log: Option<bool>,
+
     /// Per-gateway overrides (keyed by resource name)
     #[serde(default)]
     pub gateways: HashMap<String, GatewayOverride>,
@@ -274,6 +277,13 @@ functions:
         let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.port, Some(4000));
         assert!(config.functions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_json_log_config() {
+        let yaml = "port: 3000\njson_log: true\n";
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.json_log, Some(true));
     }
 
     #[test]
