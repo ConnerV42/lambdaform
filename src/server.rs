@@ -439,14 +439,17 @@ fn format_bytes(bytes: usize) -> String {
 /// Handle incoming HTTP requests
 async fn handle_request(
     method: Method,
-    Path(path): Path<String>,
+    path_param: Option<Path<String>>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     body: Bytes,
 ) -> Response {
     let request_start = std::time::Instant::now();
-    let path = format!("/{}", path);
+    let path = match path_param {
+        Some(Path(p)) => format!("/{}", p),
+        None => "/".to_string(),
+    };
 
     // Build request info for logging
     let query_str = if query.is_empty() {

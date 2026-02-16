@@ -281,6 +281,24 @@ impl FunctionExecutor {
             }
         }
 
+        // Auto-detect src/ directory for Python PYTHONPATH
+        if self.config.runtime.is_python() {
+            let src_dir = self.source_dir.join("src");
+            if src_dir.is_dir() {
+                let src_path = src_dir.to_string_lossy().to_string();
+                let existing = env.get("PYTHONPATH").cloned().unwrap_or_default();
+                if !existing.contains(&src_path) {
+                    let combined = if existing.is_empty() {
+                        src_path
+                    } else {
+                        format!("{}:{}", existing, src_path)
+                    };
+                    env.insert("PYTHONPATH".to_string(), combined);
+                    tracing::debug!("Auto-added src/ to PYTHONPATH: {}", env["PYTHONPATH"]);
+                }
+            }
+        }
+
         env
     }
 

@@ -187,6 +187,21 @@ impl ProjectConfig {
 
     /// Apply overrides to a parsed LambdaformConfig
     pub fn apply(&self, config: &mut crate::config::LambdaformConfig) {
+        // Warn about unmatched function overrides in lambdaform.yaml
+        for yaml_name in self.functions.keys() {
+            let matched = config
+                .functions
+                .iter()
+                .any(|f| f.resource_name == *yaml_name || f.function_name == *yaml_name);
+            if !matched {
+                tracing::warn!(
+                    "⚠️  lambdaform.yaml defines function '{}' but no matching Terraform function found. \
+                     Check that the name matches either the resource name or the resolved function_name.",
+                    yaml_name
+                );
+            }
+        }
+
         for func in &mut config.functions {
             // Apply global env vars first (Terraform values take precedence, then global, then per-function)
             for (k, v) in &self.environment {

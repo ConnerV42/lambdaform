@@ -145,7 +145,7 @@ fn compile_route(route: &RouteConfig) -> Option<CompiledRoute> {
             // Handle {proxy+} style catch-all
             if let Some(stripped) = name.strip_suffix('+') {
                 param_names.push(stripped.to_string());
-                regex_str.push_str("(.+)");
+                regex_str.push_str("(.*)");
             } else {
                 param_names.push(name.to_string());
                 regex_str.push_str("([^/]+)");

@@ -189,10 +189,9 @@ async fn test_http_api_path_parameters() {
 }
 
 #[tokio::test]
-async fn test_http_api_unmatched_returns_404() {
+async fn test_http_api_default_route_catches_unmatched() {
     let app = build_test_app("http-api");
-    // Paths not matching any explicit route return 404
-    // ($default route support may be added in a future version)
+    // $default route catches unmatched paths (API Gateway v2 behavior)
     let resp = app
         .oneshot(
             Request::get("/something/random")
@@ -202,7 +201,8 @@ async fn test_http_api_unmatched_returns_404() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // $default route sends to the hello Lambda, which returns 200
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 // ─── Environment Variables Test ─────────────────────────────────────────────

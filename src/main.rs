@@ -233,13 +233,13 @@ async fn cmd_start(
     debug_python_port: u16,
     var_files: Vec<PathBuf>,
 ) -> anyhow::Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
     println!(
-        r#"
-┌─────────────────────────────────────────┐
-│           🚀 Lambdaform v0.1.0          │
-│     Terraform-native Lambda emulator    │
-└─────────────────────────────────────────┘
-"#
+        "\n┌─────────────────────────────────────────┐\n│     \
+         🚀 Lambdaform v{:<25}│\n│     \
+         Terraform-native Lambda emulator    │\n\
+         └─────────────────────────────────────────┘\n",
+        version
     );
 
     println!("📂 Loading Terraform from: {}", dir.display());

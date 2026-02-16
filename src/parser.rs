@@ -303,7 +303,7 @@ fn parse_tf_file(
                         }
                     }
                     "aws_api_gateway_rest_api" => {
-                        if let Some(api) = parse_api_gateway_rest(resource_name, block)? {
+                        if let Some(api) = parse_api_gateway_rest(resource_name, block, resolver)? {
                             config.gateways.push(api);
                         }
                     }
@@ -323,7 +323,7 @@ fn parse_tf_file(
                         }
                     }
                     "aws_apigatewayv2_api" => {
-                        if let Some(api) = parse_apigatewayv2_api(resource_name, block)? {
+                        if let Some(api) = parse_apigatewayv2_api(resource_name, block, resolver)? {
                             config.gateways.push(api);
                         }
                     }
@@ -358,17 +358,17 @@ fn parse_tf_file(
                         }
                     }
                     "aws_dynamodb_table" => {
-                        if let Some(table) = parse_dynamodb_table(resource_name, block)? {
+                        if let Some(table) = parse_dynamodb_table(resource_name, block, resolver)? {
                             config.dynamodb_tables.push(table);
                         }
                     }
                     "aws_sqs_queue" => {
-                        if let Some(queue) = parse_sqs_queue(resource_name, block)? {
+                        if let Some(queue) = parse_sqs_queue(resource_name, block, resolver)? {
                             config.sqs_queues.push(queue);
                         }
                     }
                     "aws_sns_topic" => {
-                        if let Some(topic) = parse_sns_topic(resource_name, block)? {
+                        if let Some(topic) = parse_sns_topic(resource_name, block, resolver)? {
                             config.sns_topics.push(topic);
                         }
                     }
@@ -382,6 +382,10 @@ fn parse_tf_file(
             }
         }
     }
+
+    // Resolve cross-resource references in Lambda environment variables
+    // (e.g., aws_dynamodb_table.meetings.name → resolved table name)
+    resolve_cross_resource_env_vars(config);
 
     // Resolve API Gateway v1 routes from resource→method→integration chain
     resolve_api_gateway_routes(
@@ -401,6 +405,89 @@ fn parse_tf_file(
     );
 
     Ok(())
+}
+
+/// Resolve cross-resource references in Lambda environment variables.
+/// Builds a lookup table from parsed resources, then replaces unresolved traversal
+/// references in Lambda env vars (e.g., `aws_dynamodb_table.meetings.name` → table name,
+/// `aws_sqs_queue.ingest_queue.id` → queue name).
+fn resolve_cross_resource_env_vars(config: &mut LambdaformConfig) {
+    // Build resource attribute lookup: "aws_type.resource_name.attr" → value
+    let mut resource_attrs: HashMap<String, String> = HashMap::new();
+
+    for table in &config.dynamodb_tables {
+        let prefix = format!("aws_dynamodb_table.{}", table.resource_name);
+        resource_attrs.insert(format!("{}.name", prefix), table.name.clone());
+        // .arn is typically needed but we generate a synthetic one for local dev
+        resource_attrs.insert(
+            format!("{}.arn", prefix),
+            format!("arn:aws:dynamodb:local:000000000000:table/{}", table.name),
+        );
+        resource_attrs.insert(format!("{}.id", prefix), table.name.clone());
+    }
+
+    for queue in &config.sqs_queues {
+        let prefix = format!("aws_sqs_queue.{}", queue.resource_name);
+        resource_attrs.insert(format!("{}.id", prefix), queue.name.clone());
+        resource_attrs.insert(format!("{}.name", prefix), queue.name.clone());
+        resource_attrs.insert(
+            format!("{}.arn", prefix),
+            format!("arn:aws:sqs:local:000000000000:{}", queue.name),
+        );
+        resource_attrs.insert(
+            format!("{}.url", prefix),
+            format!(
+                "https://sqs.local.amazonaws.com/000000000000/{}",
+                queue.name
+            ),
+        );
+    }
+
+    for topic in &config.sns_topics {
+        let prefix = format!("aws_sns_topic.{}", topic.resource_name);
+        resource_attrs.insert(
+            format!("{}.arn", prefix),
+            format!("arn:aws:sns:local:000000000000:{}", topic.name),
+        );
+        resource_attrs.insert(format!("{}.id", prefix), topic.name.clone());
+        resource_attrs.insert(format!("{}.name", prefix), topic.name.clone());
+    }
+
+    // Also add IAM role references (commonly referenced)
+    // We don't track IAM roles in config, but we can provide a synthetic ARN
+    // for now, just skip unknown references gracefully
+
+    if resource_attrs.is_empty() {
+        return;
+    }
+
+    tracing::debug!(
+        "Built cross-resource lookup with {} entries",
+        resource_attrs.len()
+    );
+
+    // Resolve placeholder env vars in Lambda functions
+    // Placeholders look like ${aws_dynamodb_table.meetings.name}
+    let mut total_resolved = 0;
+    for lambda in &mut config.functions {
+        for value in lambda.environment.values_mut() {
+            if value.starts_with("${") && value.ends_with('}') {
+                let ref_key = &value[2..value.len() - 1];
+                if let Some(resolved) = resource_attrs.get(ref_key) {
+                    tracing::debug!("Resolved env ref {} → {}", ref_key, resolved);
+                    *value = resolved.clone();
+                    total_resolved += 1;
+                }
+            }
+        }
+    }
+
+    if total_resolved > 0 {
+        tracing::info!(
+            "Resolved {} cross-resource reference(s) in Lambda environment variables",
+            total_resolved
+        );
+    }
 }
 
 /// Parse aws_api_gateway_resource
@@ -574,9 +661,14 @@ fn resolve_api_gateway_routes(
 }
 
 /// Parse aws_apigatewayv2_api resource
-fn parse_apigatewayv2_api(name: &str, block: &hcl::Block) -> Result<Option<ApiGatewayConfig>> {
+fn parse_apigatewayv2_api(
+    name: &str,
+    block: &hcl::Block,
+    resolver: &VariableResolver,
+) -> Result<Option<ApiGatewayConfig>> {
     let body = &block.body;
-    let api_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+    let api_name =
+        get_string_attr_resolved(body, "name", resolver).unwrap_or_else(|| name.to_string());
     let protocol_type =
         get_string_attr(body, "protocol_type").unwrap_or_else(|| "HTTP".to_string());
     let route_selection_expression = get_string_attr(body, "route_selection_expression");
@@ -749,7 +841,7 @@ fn resolve_apigatewayv2_routes(
 /// For WebSocket APIs, route keys are: $connect, $disconnect, $default, or custom action names
 fn parse_v2_route_key(route_key: &str) -> (HttpMethod, String) {
     match route_key {
-        "$default" => (HttpMethod::Any, "/".to_string()),
+        "$default" => (HttpMethod::Any, "/{proxy+}".to_string()),
         "$connect" | "$disconnect" => (HttpMethod::Any, route_key.to_string()),
         _ => {
             let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
@@ -911,10 +1003,12 @@ fn parse_sfn_state_machine(
 fn parse_dynamodb_table(
     name: &str,
     block: &hcl::Block,
+    resolver: &VariableResolver,
 ) -> Result<Option<crate::config::DynamoDbTableConfig>> {
     let body = &block.body;
 
-    let table_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+    let table_name =
+        get_string_attr_resolved(body, "name", resolver).unwrap_or_else(|| name.to_string());
 
     let hash_key = get_string_attr(body, "hash_key");
     let range_key = get_string_attr(body, "range_key");
@@ -959,10 +1053,12 @@ fn parse_dynamodb_table(
 fn parse_sqs_queue(
     name: &str,
     block: &hcl::Block,
+    resolver: &VariableResolver,
 ) -> Result<Option<crate::config::SqsQueueConfig>> {
     let body = &block.body;
 
-    let queue_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+    let queue_name =
+        get_string_attr_resolved(body, "name", resolver).unwrap_or_else(|| name.to_string());
 
     let fifo_queue = get_bool_attr(body, "fifo_queue").unwrap_or(false);
     let visibility_timeout = get_number_attr(body, "visibility_timeout_seconds").unwrap_or(30);
@@ -979,10 +1075,12 @@ fn parse_sqs_queue(
 fn parse_sns_topic(
     name: &str,
     block: &hcl::Block,
+    resolver: &VariableResolver,
 ) -> Result<Option<crate::config::SnsTopicConfig>> {
     let body = &block.body;
 
-    let topic_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+    let topic_name =
+        get_string_attr_resolved(body, "name", resolver).unwrap_or_else(|| name.to_string());
 
     let fifo_topic = get_bool_attr(body, "fifo_topic").unwrap_or(false);
 
@@ -1099,10 +1197,15 @@ fn get_list_string_attrs(body: &hcl::Body, name: &str) -> Vec<String> {
 }
 
 /// Parse aws_api_gateway_rest_api resource
-fn parse_api_gateway_rest(name: &str, block: &hcl::Block) -> Result<Option<ApiGatewayConfig>> {
+fn parse_api_gateway_rest(
+    name: &str,
+    block: &hcl::Block,
+    resolver: &VariableResolver,
+) -> Result<Option<ApiGatewayConfig>> {
     let body = &block.body;
 
-    let api_name = get_string_attr(body, "name").unwrap_or_else(|| name.to_string());
+    let api_name =
+        get_string_attr_resolved(body, "name", resolver).unwrap_or_else(|| name.to_string());
 
     Ok(Some(ApiGatewayConfig {
         resource_name: name.to_string(),
@@ -1238,7 +1341,16 @@ fn extract_environment_resolved(
                                                 ))
                                                 .collect();
                                         let traversal_str = parts.join(".");
-                                        resolver.resolve_traversal(&traversal_str)
+                                        // Try var.xxx resolution first, fall back to
+                                        // storing the raw traversal as a placeholder
+                                        // for cross-resource resolution in post-parse step
+                                        Some(
+                                            resolver
+                                                .resolve_traversal(&traversal_str)
+                                                .unwrap_or_else(|| {
+                                                    format!("${{{}}}", traversal_str)
+                                                }),
+                                        )
                                     }
                                     _ => None,
                                 };
@@ -1352,10 +1464,10 @@ resource "aws_apigatewayv2_route" "default" {
         assert_eq!(r1.path, "/hello");
         assert_eq!(r1.function_resource, "hello");
 
-        // $default → ANY /
+        // $default → ANY /{proxy+} (catch-all)
         let r2 = &gw.routes[1];
         assert_eq!(r2.method, HttpMethod::Any);
-        assert_eq!(r2.path, "/");
+        assert_eq!(r2.path, "/{proxy+}");
         assert_eq!(r2.function_resource, "hello");
     }
 
@@ -1978,5 +2090,103 @@ resource "aws_lambda_function" "api" {
         let func = &config.functions[0];
         // auto.tfvars should override terraform.tfvars
         assert_eq!(func.function_name, "prod");
+    }
+
+    #[test]
+    fn test_variable_resolution_in_dynamodb_table_names() {
+        let tf_content = r#"
+variable "stage" {
+  type    = string
+  default = "dev"
+}
+
+resource "aws_dynamodb_table" "users" {
+  name         = "myapp-users-${var.stage}"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "userId"
+
+  attribute {
+    name = "userId"
+    type = "S"
+  }
+}
+
+resource "aws_sqs_queue" "jobs" {
+  name = "myapp-jobs-${var.stage}"
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.dynamodb_tables.len(), 1);
+        assert_eq!(config.dynamodb_tables[0].name, "myapp-users-dev");
+
+        assert_eq!(config.sqs_queues.len(), 1);
+        assert_eq!(config.sqs_queues[0].name, "myapp-jobs-dev");
+    }
+
+    #[test]
+    fn test_cross_resource_env_var_resolution() {
+        let tf_content = r#"
+variable "stage" {
+  type    = string
+  default = "dev"
+}
+
+resource "aws_dynamodb_table" "meetings" {
+  name         = "meetings-${var.stage}"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "meeting_id"
+
+  attribute {
+    name = "meeting_id"
+    type = "S"
+  }
+}
+
+resource "aws_sqs_queue" "ingest" {
+  name = "ingest-queue-${var.stage}"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api-${var.stage}"
+  handler       = "index.handler"
+  runtime       = "python3.12"
+
+  environment {
+    variables = {
+      STAGE          = var.stage
+      MEETINGS_TABLE = aws_dynamodb_table.meetings.name
+      QUEUE_URL      = aws_sqs_queue.ingest.url
+      QUEUE_ARN      = aws_sqs_queue.ingest.arn
+    }
+  }
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+
+        assert_eq!(func.function_name, "api-dev");
+        assert_eq!(func.environment.get("STAGE"), Some(&"dev".to_string()));
+        assert_eq!(
+            func.environment.get("MEETINGS_TABLE"),
+            Some(&"meetings-dev".to_string())
+        );
+        assert!(func
+            .environment
+            .get("QUEUE_URL")
+            .unwrap()
+            .contains("ingest-queue-dev"));
+        assert!(func
+            .environment
+            .get("QUEUE_ARN")
+            .unwrap()
+            .contains("ingest-queue-dev"));
     }
 }
