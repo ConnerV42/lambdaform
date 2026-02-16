@@ -295,7 +295,12 @@ fn main() -> anyhow::Result<()> {
             clear,
             port,
             json,
-        } => cmd_replay(dir, index, all, last, method, path, clear, port, json),
+        } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(cmd_replay(
+                dir, index, all, last, method, path, clear, port, json,
+            ))
+        }
     }
 }
 
@@ -1394,7 +1399,7 @@ fn cmd_init(dir: PathBuf, accept_defaults: bool) -> anyhow::Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cmd_replay(
+async fn cmd_replay(
     dir: PathBuf,
     index: Option<usize>,
     all: bool,
@@ -1455,7 +1460,7 @@ fn cmd_replay(
             anyhow::bail!("Index {} out of range (1-{})", idx, entries.len());
         }
         let entry = &entries[idx - 1];
-        return replay_request(entry, port_override);
+        return replay_request(entry, port_override).await;
     }
 
     // Replay all
@@ -1463,7 +1468,7 @@ fn cmd_replay(
         println!("🔁 Replaying {} requests...\n", entries.len());
         for (i, entry) in entries.iter().enumerate() {
             println!("--- Request {} ---", i + 1);
-            if let Err(e) = replay_request(entry, port_override) {
+            if let Err(e) = replay_request(entry, port_override).await {
                 println!("  ❌ Error: {}", e);
             }
             println!();
@@ -1492,10 +1497,15 @@ fn cmd_replay(
     Ok(())
 }
 
-fn replay_request(
+async fn replay_request(
     entry: &lambdaform::history::HistoryEntry,
     port_override: Option<u16>,
 ) -> anyhow::Result<()> {
+    use http_body_util::{BodyExt, Empty, Full};
+    use hyper::body::Bytes;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
     let port = port_override.unwrap_or(entry.port);
     let query_str = entry
         .query
@@ -1515,45 +1525,48 @@ fn replay_request(
     let url = format!("http://127.0.0.1:{}{}{}", port, entry.path, query_str);
     println!("  → {} {} (fn: {})", entry.method, url, entry.function);
 
-    // Build curl command
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args([
-        "-s",
-        "-w",
-        "\n%{http_code}\n%{time_total}",
-        "-X",
-        &entry.method,
-    ]);
+    let start = std::time::Instant::now();
 
-    // Add headers (skip host, content-length)
+    let uri: hyper::Uri = url.parse()?;
+    let method: hyper::Method = entry.method.parse()?;
+
+    // Build request
+    let mut builder = hyper::Request::builder().method(method).uri(uri);
+
+    // Add headers (skip host, content-length — hyper handles these)
     if let Some(ref headers) = entry.headers {
         for (k, v) in headers {
             let lower = k.to_lowercase();
             if lower != "host" && lower != "content-length" {
-                cmd.args(["-H", &format!("{}: {}", k, v)]);
+                builder = builder.header(k.as_str(), v.as_str());
             }
         }
     }
 
-    // Add body
-    if let Some(ref body) = entry.body {
-        cmd.args(["-d", body]);
-    }
+    let client = Client::builder(TokioExecutor::new())
+        .build_http::<http_body_util::Either<Full<Bytes>, Empty<Bytes>>>();
 
-    cmd.arg(&url);
+    let request = if let Some(ref body) = entry.body {
+        builder.body(http_body_util::Either::Left(Full::new(Bytes::from(
+            body.clone(),
+        ))))?
+    } else {
+        builder.body(http_body_util::Either::Right(Empty::new()))?
+    };
 
-    match cmd.output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let lines: Vec<&str> = stdout.trim().rsplitn(3, '\n').collect();
-            // lines[0] = time_total, lines[1] = status code, lines[2] = body
-            let (time_str, status_str, body) = match lines.len() {
-                3 => (lines[0], lines[1], lines[2]),
-                2 => (lines[0], lines[1], ""),
-                _ => ("0", "0", stdout.trim()),
-            };
-            let status: u16 = status_str.parse().unwrap_or(0);
-            let time_ms = time_str.parse::<f64>().unwrap_or(0.0) * 1000.0;
+    match client.request(request).await {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let body_bytes = response
+                .into_body()
+                .collect()
+                .await
+                .map(|c| c.to_bytes())
+                .unwrap_or_default();
+            let duration = start.elapsed();
+            let time_ms = duration.as_secs_f64() * 1000.0;
+
+            let body = String::from_utf8_lossy(&body_bytes);
 
             let icon = if (200..300).contains(&status) {
                 "✅"
@@ -1572,14 +1585,17 @@ fn replay_request(
                 "  ← {} {} [{:.0}ms] {}",
                 icon, status, time_ms, display_body
             );
-
-            if status == 0 {
-                println!("    (Is `lambdaform start` running on port {}?)", port);
-            }
         }
         Err(e) => {
-            println!("  ← ❌ Failed to run curl: {}", e);
-            println!("    (Make sure curl is installed)");
+            let err_str = e.to_string();
+            if err_str.contains("Connection refused") || err_str.contains("tcp connect error") {
+                println!(
+                    "  ← ❌ Connection refused (is `lambdaform start` running on port {}?)",
+                    port
+                );
+            } else {
+                println!("  ← ❌ Request failed: {}", e);
+            }
         }
     }
 
