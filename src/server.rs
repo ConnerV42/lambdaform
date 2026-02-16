@@ -20,6 +20,26 @@ use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
 use crate::runtime::{DebugOptions, FunctionExecutor, LambdaEvent};
 
+/// Global TUI event sender for live request monitoring
+#[cfg(feature = "tui")]
+static TUI_SENDER: std::sync::OnceLock<
+    tokio::sync::broadcast::Sender<crate::tui::ui::RequestEvent>,
+> = std::sync::OnceLock::new();
+
+/// Set the global TUI sender (call once before starting servers)
+#[cfg(feature = "tui")]
+pub fn set_tui_sender(tx: tokio::sync::broadcast::Sender<crate::tui::ui::RequestEvent>) {
+    let _ = TUI_SENDER.set(tx);
+}
+
+/// Send a request event to the TUI (no-op if not set)
+#[cfg(feature = "tui")]
+fn emit_tui_event(event: crate::tui::ui::RequestEvent) {
+    if let Some(tx) = TUI_SENDER.get() {
+        let _ = tx.send(event);
+    }
+}
+
 /// Gateway assignment: which gateway runs on which port
 #[derive(Debug, Clone)]
 pub struct GatewayBinding {
@@ -781,6 +801,18 @@ async fn handle_request(
                 format_bytes(response_size)
             );
 
+            // Emit TUI event
+            #[cfg(feature = "tui")]
+            emit_tui_event(crate::tui::ui::RequestEvent {
+                timestamp: format_timestamp(),
+                method: method.to_string(),
+                path: path.clone(),
+                status: status.as_u16(),
+                duration_ms: duration.as_millis() as u64,
+                function: function.function_name.clone(),
+                response_bytes: response_size,
+            });
+
             // Log slow requests
             if duration.as_millis() > 3000 {
                 tracing::warn!(
@@ -852,6 +884,18 @@ async fn handle_request(
                 };
                 history.record(entry).await;
             }
+
+            // Emit TUI event for errors
+            #[cfg(feature = "tui")]
+            emit_tui_event(crate::tui::ui::RequestEvent {
+                timestamp: format_timestamp(),
+                method: method.to_string(),
+                path: path.clone(),
+                status: 500,
+                duration_ms: duration.as_millis() as u64,
+                function: function.function_name.clone(),
+                response_bytes: 0,
+            });
 
             tracing::error!(
                 "← ❌ 500 {} {} [{}] error: {}",

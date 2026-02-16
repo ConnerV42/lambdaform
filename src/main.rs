@@ -67,6 +67,10 @@ enum Commands {
         /// Additional .tfvars files to load (like terraform -var-file)
         #[arg(long = "var-file", value_name = "FILE")]
         var_files: Vec<PathBuf>,
+
+        /// Enable terminal UI with live request log (requires --features tui)
+        #[arg(long)]
+        tui: bool,
     },
 
     /// Invoke a Lambda function directly
@@ -207,6 +211,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging — verbose flag sets DEBUG level, json_log enables structured output
+    let tui_mode = matches!(&cli.command, Commands::Start { tui: true, .. });
     let verbose = matches!(&cli.command, Commands::Start { verbose: true, .. });
     let json_log = matches!(&cli.command, Commands::Start { json_log: true, .. });
     let default_level = if verbose {
@@ -217,7 +222,16 @@ fn main() -> anyhow::Result<()> {
     let env_filter =
         tracing_subscriber::EnvFilter::from_default_env().add_directive(default_level.into());
 
-    if json_log {
+    if tui_mode {
+        // In TUI mode, suppress normal logging (TUI takes over the terminal)
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::WARN.into()),
+            )
+            .with_writer(std::io::sink)
+            .init();
+    } else if json_log {
         tracing_subscriber::fmt()
             .json()
             .with_env_filter(env_filter)
@@ -241,6 +255,7 @@ fn main() -> anyhow::Result<()> {
             debug_python,
             debug_python_port,
             var_files,
+            tui,
         } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(cmd_start(
@@ -252,6 +267,7 @@ fn main() -> anyhow::Result<()> {
                 debug_python,
                 debug_python_port,
                 var_files,
+                tui,
             ))
         }
         Commands::Invoke {
@@ -314,7 +330,15 @@ async fn cmd_start(
     debug_python: bool,
     debug_python_port: u16,
     var_files: Vec<PathBuf>,
+    tui: bool,
 ) -> anyhow::Result<()> {
+    // Check TUI feature availability
+    #[cfg(not(feature = "tui"))]
+    if tui {
+        lambdaform::tui::tui_not_available();
+    }
+    #[cfg(not(feature = "tui"))]
+    let _ = tui;
     let version = env!("CARGO_PKG_VERSION");
     println!(
         "\n┌─────────────────────────────────────────┐\n│     \
@@ -588,6 +612,52 @@ async fn cmd_start(
         .iter()
         .any(|g| g.api_type != config::ApiType::WebSocket);
 
+    // Set up TUI if enabled
+    #[cfg(feature = "tui")]
+    let tui_handle = if tui {
+        let (tx, rx) = lambdaform::tui::create_tui_channel();
+        server::set_tui_sender(tx);
+
+        // Build server info for the TUI header
+        let tui_ports: Vec<(String, u16)> = if http_bindings.len() > 1 {
+            http_bindings
+                .iter()
+                .map(|b| (b.gateway_name.clone(), b.port))
+                .collect()
+        } else {
+            vec![("".to_string(), port)]
+        };
+        let tui_functions: Vec<String> = config
+            .functions
+            .iter()
+            .map(|f| f.function_name.clone())
+            .collect();
+
+        let server_info = lambdaform::tui::ui::ServerInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            ports: tui_ports,
+            functions: tui_functions,
+            watching: watch,
+        };
+
+        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let shutdown_clone = shutdown.clone();
+
+        // Spawn TUI on a blocking thread (it takes over the terminal)
+        let handle = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(lambdaform::tui::ui::run_tui(
+                rx,
+                server_info,
+                shutdown_clone,
+            ))
+        });
+
+        Some((handle, shutdown))
+    } else {
+        None
+    };
+
     // Start HTTP server(s) (blocks until shutdown)
     if http_bindings.len() > 1 {
         server::start_multi_gateway(
@@ -610,6 +680,12 @@ async fn cmd_start(
         // Only WebSocket gateways, wait for them
         let (result, _, _) = futures::future::select_all(ws_handles).await;
         result??;
+    }
+
+    // Wait for TUI to clean up if it was running
+    #[cfg(feature = "tui")]
+    if let Some((handle, _shutdown)) = tui_handle {
+        let _ = handle.await;
     }
 
     Ok(())

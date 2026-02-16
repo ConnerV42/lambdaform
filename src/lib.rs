@@ -10,5 +10,6 @@ pub mod runtime;
 pub mod server;
 pub mod stepfunctions;
 pub mod trigger;
+pub mod tui;
 pub mod watcher;
 pub mod websocket;
