@@ -443,7 +443,10 @@ fn collect_module_blocks(dir: &Path, resolver: &VariableResolver) -> Result<Vec<
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let body: hcl::Body = match hcl::from_str(&content) {
                 Ok(b) => b,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!("Skipping {} (parse error: {})", path.display(), e);
+                    continue;
+                }
             };
 
             for block in body.blocks() {
@@ -498,6 +501,43 @@ fn collect_module_blocks(dir: &Path, resolver: &VariableResolver) -> Result<Vec<
     }
 
     Ok(modules)
+}
+
+/// Extract line and column from an HCL error message like "HCL parse error in line 2, column 5"
+fn extract_error_location(err_msg: &str) -> Option<(usize, usize)> {
+    let line_prefix = "in line ";
+    let line_start = err_msg.find(line_prefix)?;
+    let after_line = &err_msg[line_start + line_prefix.len()..];
+    let line_end = after_line.find(',')?;
+    let line: usize = after_line[..line_end].trim().parse().ok()?;
+
+    let col_prefix = "column ";
+    let col_start = after_line.find(col_prefix)?;
+    let after_col = &after_line[col_start + col_prefix.len()..];
+    let col_end = after_col
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_col.len());
+    let col: usize = after_col[..col_end].trim().parse().ok()?;
+
+    Some((line, col))
+}
+
+/// Find the 1-based line number of a substring offset within content
+fn offset_to_line(content: &str, offset: usize) -> usize {
+    content[..offset.min(content.len())]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count()
+        + 1
+}
+
+/// Find the byte offset of a resource block by name in file content.
+/// Searches for patterns like `resource "type" "name"`.
+fn find_resource_line(content: &str, resource_type: &str, resource_name: &str) -> Option<usize> {
+    let pattern = format!("\"{}\" \"{}\"", resource_type, resource_name);
+    content
+        .find(&pattern)
+        .map(|offset| offset_to_line(content, offset))
 }
 
 /// Intermediate structs for collecting API Gateway resources before resolving
@@ -576,8 +616,17 @@ fn parse_tf_file(
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
 
     // Parse HCL
-    let body: hcl::Body = hcl::from_str(&content)
-        .with_context(|| format!("Failed to parse HCL in {}", path.display()))?;
+    let body: hcl::Body = match hcl::from_str(&content) {
+        Ok(b) => b,
+        Err(e) => {
+            let err_msg = e.to_string();
+            // Extract line number from HCL error (format: "HCL parse error in line X, column Y")
+            let location = extract_error_location(&err_msg)
+                .map(|(line, col)| format!("{}:{}:{}", path.display(), line, col))
+                .unwrap_or_else(|| path.display().to_string());
+            return Err(anyhow::anyhow!("Parse error at {}\n{}", location, err_msg));
+        }
+    };
 
     let mut apigw_resources: Vec<ApigwResource> = Vec::new();
     let mut apigw_methods: Vec<ApigwMethod> = Vec::new();
@@ -598,7 +647,9 @@ fn parse_tf_file(
 
                 match resource_type.as_str() {
                     "aws_lambda_function" => {
-                        if let Some(lambda) = parse_lambda_function(resource_name, block, resolver)?
+                        let line = find_resource_line(&content, resource_type, resource_name);
+                        if let Some(lambda) =
+                            parse_lambda_function(resource_name, block, resolver, path, line)?
                         {
                             config.functions.push(lambda);
                         }
@@ -1195,8 +1246,13 @@ fn parse_lambda_function(
     name: &str,
     block: &hcl::Block,
     resolver: &VariableResolver,
+    file_path: &Path,
+    line: Option<usize>,
 ) -> Result<Option<LambdaConfig>> {
     let body = &block.body;
+    let loc = line
+        .map(|l| format!("{}:{}", file_path.display(), l))
+        .unwrap_or_else(|| file_path.display().to_string());
 
     // Extract required attributes (with variable resolution)
     let function_name = get_string_attr_resolved(body, "function_name", resolver)
@@ -1205,7 +1261,11 @@ fn parse_lambda_function(
     let handler = match get_string_attr_resolved(body, "handler", resolver) {
         Some(h) => h,
         None => {
-            tracing::warn!("Lambda {} missing handler, skipping", name);
+            tracing::warn!(
+                "Lambda '{}' missing handler attribute, skipping ({})",
+                name,
+                loc
+            );
             return Ok(None);
         }
     };
@@ -1213,7 +1273,11 @@ fn parse_lambda_function(
     let runtime_str = match get_string_attr_resolved(body, "runtime", resolver) {
         Some(r) => r,
         None => {
-            tracing::warn!("Lambda {} missing runtime, skipping", name);
+            tracing::warn!(
+                "Lambda '{}' missing runtime attribute, skipping ({})",
+                name,
+                loc
+            );
             return Ok(None);
         }
     };
@@ -1673,6 +1737,50 @@ fn extract_environment_resolved(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_find_resource_line() {
+        let content =
+            "# comment\n\nresource \"aws_lambda_function\" \"hello\" {\n  handler = \"x\"\n}\n";
+        assert_eq!(
+            find_resource_line(content, "aws_lambda_function", "hello"),
+            Some(3)
+        );
+        assert_eq!(
+            find_resource_line(content, "aws_lambda_function", "missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_error_location() {
+        let msg = "HCL parse error in line 2, column 5\n  = expected something";
+        assert_eq!(extract_error_location(msg), Some((2, 5)));
+
+        let msg = "HCL parse error in line 10, column 42\n  = invalid block";
+        assert_eq!(extract_error_location(msg), Some((10, 42)));
+
+        assert_eq!(extract_error_location("some other error"), None);
+    }
+
+    #[test]
+    fn test_parse_error_includes_file_location() {
+        let bad_tf = "resource \"aws_lambda_function\" \"test\" {\n  function_name = \"hello\n}\n";
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("broken.tf");
+        fs::write(&file_path, bad_tf).unwrap();
+
+        let result = parse_terraform_dir(dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        // Should contain the filename
+        assert!(
+            err_msg.contains("broken.tf"),
+            "Error should include filename, got: {}",
+            err_msg
+        );
+    }
 
     #[test]
     fn test_parse_simple_lambda() {
