@@ -15,7 +15,7 @@ use crate::config::{LambdaConfig, Runtime};
 use crate::pool::ProcessPool;
 
 /// Lambda event structure (API Gateway proxy format v1)
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LambdaEvent {
     pub http_method: String,
@@ -30,7 +30,7 @@ pub struct LambdaEvent {
 }
 
 /// API Gateway request context (matches real AWS structure)
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestContext {
     pub stage: String,
@@ -43,7 +43,7 @@ pub struct RequestContext {
 }
 
 /// Request identity info
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestIdentity {
     pub source_ip: String,

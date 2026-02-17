@@ -31,6 +31,7 @@
 - [Terraform Modules](./advanced/modules.md)
 - [OpenTofu Compatibility](./advanced/opentofu.md)
 - [CI/CD Integration](./advanced/ci-cd.md)
+- [Plugins](./advanced/plugins.md)
 - [Structured Logging](./advanced/logging.md)
 
 # Architecture

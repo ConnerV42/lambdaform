@@ -3,6 +3,7 @@
 pub mod config;
 pub mod history;
 pub mod parser;
+pub mod plugin;
 pub mod pool;
 pub mod project_config;
 pub mod router;

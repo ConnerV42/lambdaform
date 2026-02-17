@@ -190,6 +190,17 @@ enum Commands {
         json: bool,
     },
 
+    /// List configured plugins and their capabilities
+    Plugins {
+        /// Directory containing Terraform files
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Visualize Step Functions state machines (read-only)
     #[command(name = "stepfunctions", alias = "sfn")]
     StepFunctions {
@@ -299,6 +310,10 @@ fn main() -> anyhow::Result<()> {
                 function,
             ))
         }
+        Commands::Plugins { dir, json } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(cmd_plugins(dir, json))
+        }
         Commands::StepFunctions { dir, name, json } => cmd_stepfunctions(dir, name, json),
         Commands::Init { dir, yes } => cmd_init(dir, yes),
         Commands::Replay {
@@ -375,6 +390,24 @@ async fn cmd_start(
             .and_then(|pc| pc.watch)
             .unwrap_or(watch)
     };
+
+    // Load plugins if configured
+    // Load plugins if configured
+    if let Some(ref pc) = project_config {
+        if !pc.plugins.is_empty() {
+            println!("🔌 Loading {} plugin(s)...", pc.plugins.len());
+            let pm = lambdaform::plugin::PluginManager::load_plugins(&pc.plugins, &dir).await?;
+            println!("🔌 {} plugin(s) ready", pm.plugin_count());
+
+            // Run on_resource hooks for all parsed resources
+            // (Side effects like env vars get applied to function configs)
+            let effects = run_plugin_resource_hooks(&pm, &config, &dir).await;
+            apply_plugin_side_effects(&mut config, &effects);
+
+            // Make plugin manager globally available for request/response hooks
+            server::set_plugin_manager(pm);
+        }
+    }
 
     if config.functions.is_empty() {
         println!("⚠️  No Lambda functions found in {}", dir.display());
@@ -1171,6 +1204,56 @@ async fn cmd_trigger(
     trigger::execute_trigger(&config, &source_type, &source, messages, &dir).await
 }
 
+async fn cmd_plugins(dir: PathBuf, json_output: bool) -> anyhow::Result<()> {
+    // Load project config
+    let pc = match project_config::ProjectConfig::load(&dir)? {
+        Some(pc) => pc,
+        None => {
+            println!("No lambdaform.yaml found in {}", dir.display());
+            println!("Run `lambdaform init` to create one.");
+            return Ok(());
+        }
+    };
+
+    if pc.plugins.is_empty() {
+        println!("No plugins configured in lambdaform.yaml.");
+        println!("\nAdd plugins to your lambdaform.yaml:");
+        println!("  plugins:");
+        println!("    - name: my-plugin");
+        println!("      path: ./plugins/my-plugin.py");
+        return Ok(());
+    }
+
+    println!("🔌 Loading {} plugin(s)...\n", pc.plugins.len());
+
+    let pm = lambdaform::plugin::PluginManager::load_plugins(&pc.plugins, &dir).await?;
+
+    if json_output {
+        let info: Vec<serde_json::Value> = pc
+            .plugins
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                serde_json::json!({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "config": entry.config,
+                    "index": i + 1,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    } else {
+        println!("{} plugin(s) loaded successfully:\n", pm.plugin_count());
+        for (i, name) in pm.plugin_names().iter().enumerate() {
+            println!("  {}. {}", i + 1, name);
+        }
+        println!("\nUse --json for detailed output.");
+    }
+
+    Ok(())
+}
+
 fn cmd_stepfunctions(dir: PathBuf, name: Option<String>, json_output: bool) -> anyhow::Result<()> {
     let config = parser::parse_terraform_dir(&dir)?;
 
@@ -1676,4 +1759,90 @@ async fn replay_request(
     }
 
     Ok(())
+}
+
+/// Run on_resource hooks for all known resource types in the parsed config.
+/// Returns accumulated side effects.
+async fn run_plugin_resource_hooks(
+    pm: &lambdaform::plugin::PluginManager,
+    tf_config: &config::LambdaformConfig,
+    _dir: &std::path::Path,
+) -> Vec<lambdaform::plugin::PluginSideEffect> {
+    let mut all_effects = Vec::new();
+
+    // DynamoDB tables
+    for table in &tf_config.dynamodb_tables {
+        let attrs = serde_json::json!({
+            "name": table.name,
+            "hash_key": table.hash_key,
+            "range_key": table.range_key,
+            "billing_mode": table.billing_mode,
+        });
+        if let Ok(effects) = pm
+            .on_resource("aws_dynamodb_table", &table.resource_name, attrs)
+            .await
+        {
+            all_effects.extend(effects);
+        }
+    }
+
+    // SQS queues
+    for queue in &tf_config.sqs_queues {
+        let attrs = serde_json::json!({
+            "name": queue.name,
+        });
+        if let Ok(effects) = pm
+            .on_resource("aws_sqs_queue", &queue.resource_name, attrs)
+            .await
+        {
+            all_effects.extend(effects);
+        }
+    }
+
+    // SNS topics
+    for topic in &tf_config.sns_topics {
+        let attrs = serde_json::json!({
+            "name": topic.name,
+        });
+        if let Ok(effects) = pm
+            .on_resource("aws_sns_topic", &topic.resource_name, attrs)
+            .await
+        {
+            all_effects.extend(effects);
+        }
+    }
+
+    all_effects
+}
+
+/// Apply plugin side effects (env vars, etc.) to the Lambda config.
+fn apply_plugin_side_effects(
+    tf_config: &mut config::LambdaformConfig,
+    effects: &[lambdaform::plugin::PluginSideEffect],
+) {
+    for effect in effects {
+        match effect {
+            lambdaform::plugin::PluginSideEffect::EnvVar {
+                functions,
+                key,
+                value,
+            } => {
+                for func in &mut tf_config.functions {
+                    if functions.is_empty()
+                        || functions
+                            .iter()
+                            .any(|f| f == &func.resource_name || f == &func.function_name)
+                    {
+                        func.environment.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            lambdaform::plugin::PluginSideEffect::Endpoint { service, url } => {
+                tracing::info!("🔌 Plugin endpoint: {} → {}", service, url);
+            }
+            lambdaform::plugin::PluginSideEffect::Log { .. } => {
+                // Already logged during on_resource
+            }
+        }
+    }
 }

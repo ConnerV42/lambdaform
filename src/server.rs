@@ -20,6 +20,15 @@ use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
 use crate::runtime::{DebugOptions, FunctionExecutor, LambdaEvent};
 
+/// Global plugin manager for custom resource handlers
+static PLUGIN_MANAGER: std::sync::OnceLock<Arc<crate::plugin::PluginManager>> =
+    std::sync::OnceLock::new();
+
+/// Set the global plugin manager (call once before starting servers)
+pub fn set_plugin_manager(pm: crate::plugin::PluginManager) {
+    let _ = PLUGIN_MANAGER.set(Arc::new(pm));
+}
+
 /// Global TUI event sender for live request monitoring
 #[cfg(feature = "tui")]
 static TUI_SENDER: std::sync::OnceLock<
@@ -61,6 +70,8 @@ pub struct AppState {
     pub history: Option<HistoryRecorder>,
     /// Port this server is bound to (for history recording)
     pub port: u16,
+    /// Plugin manager for custom resource handlers
+    pub plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
 }
 
 /// The reloadable portion of app state
@@ -85,7 +96,14 @@ impl AppState {
             pool: Arc::new(ProcessPool::new()),
             history: None,
             port: 0,
+            plugin_manager: PLUGIN_MANAGER.get().cloned(),
         }
+    }
+
+    /// Set the plugin manager for this state
+    pub fn with_plugins(mut self, manager: crate::plugin::PluginManager) -> Self {
+        self.plugin_manager = Some(Arc::new(manager));
+        self
     }
 
     /// Create state for a single gateway
@@ -104,6 +122,7 @@ impl AppState {
             pool: Arc::new(ProcessPool::new()),
             history: None,
             port: 0,
+            plugin_manager: PLUGIN_MANAGER.get().cloned(),
         }
     }
 
@@ -767,6 +786,31 @@ async fn handle_request(
         Some(String::from_utf8_lossy(&body).to_string())
     };
     let history_function = function.function_name.clone();
+
+    // Plugin on_request hook: allow plugins to modify the event before invocation
+    let event = if let Some(ref pm) = state.plugin_manager {
+        if !pm.request_interceptors().is_empty() {
+            match serde_json::to_value(&event) {
+                Ok(event_json) => {
+                    match pm
+                        .on_request(method.as_ref(), &path, event_json, &function.function_name)
+                        .await
+                    {
+                        Ok(modified) => serde_json::from_value(modified).unwrap_or(event),
+                        Err(e) => {
+                            tracing::warn!("⚠️ Plugin on_request error (continuing): {}", e);
+                            event
+                        }
+                    }
+                }
+                Err(_) => event,
+            }
+        } else {
+            event
+        }
+    } else {
+        event
+    };
 
     match executor.invoke(event).await {
         Ok(response) => {

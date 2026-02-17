@@ -7,6 +7,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::plugin::PluginEntry;
+
 /// Top-level project config (lambdaform.yaml)
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -41,6 +43,10 @@ pub struct ProjectConfig {
     /// Per-gateway overrides (keyed by resource name)
     #[serde(default)]
     pub gateways: HashMap<String, GatewayOverride>,
+
+    /// Plugin configurations
+    #[serde(default)]
+    pub plugins: Vec<PluginEntry>,
 }
 
 /// Per-gateway overrides
