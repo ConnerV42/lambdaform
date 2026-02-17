@@ -8,6 +8,7 @@ use walkdir::WalkDir;
 
 use bollard::Docker;
 use lambdaform::config;
+use lambdaform::graph;
 use lambdaform::parser;
 use lambdaform::project_config;
 use lambdaform::runtime;
@@ -236,6 +237,21 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Visualize infrastructure relationships (Lambda→APIGW→DynamoDB→SQS→SNS)
+    Graph {
+        /// Directory containing Terraform files
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+
+        /// Output format: ascii (default), dot (Graphviz), or json
+        #[arg(short, long, default_value = "ascii")]
+        format: String,
+
+        /// Additional .tfvars files to load
+        #[arg(long = "var-file", value_name = "FILE")]
+        var_files: Vec<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -341,6 +357,11 @@ fn main() -> anyhow::Result<()> {
             var_files,
         } => cmd_cost(dir, arch, json, var_files),
         Commands::StepFunctions { dir, name, json } => cmd_stepfunctions(dir, name, json),
+        Commands::Graph {
+            dir,
+            format,
+            var_files,
+        } => cmd_graph(dir, format, var_files),
         Commands::Init { dir, yes } => cmd_init(dir, yes),
         Commands::Replay {
             dir,
@@ -1937,4 +1958,34 @@ fn apply_plugin_side_effects(
             }
         }
     }
+}
+
+fn cmd_graph(dir: PathBuf, format: String, var_files: Vec<PathBuf>) -> anyhow::Result<()> {
+    let config = if var_files.is_empty() {
+        parser::parse_terraform_dir(&dir)?
+    } else {
+        parser::parse_terraform_dir_with_var_files(&dir, &var_files)?
+    };
+
+    let (nodes, edges) = graph::build_graph(&config);
+
+    if nodes.is_empty() {
+        println!("No infrastructure resources found in {}", dir.display());
+        return Ok(());
+    }
+
+    match format.as_str() {
+        "dot" | "graphviz" => {
+            print!("{}", graph::render_dot(&nodes, &edges));
+        }
+        "json" => {
+            let json = graph::render_json(&nodes, &edges);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            print!("{}", graph::render_ascii(&nodes, &edges));
+        }
+    }
+
+    Ok(())
 }

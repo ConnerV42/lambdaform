@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod cost;
+pub mod graph;
 pub mod history;
 pub mod parser;
 pub mod plugin;
