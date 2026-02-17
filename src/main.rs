@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
+use bollard::Docker;
 use lambdaform::config;
 use lambdaform::parser;
 use lambdaform::project_config;
@@ -446,8 +447,24 @@ async fn cmd_start(
 
     // Log discovered functions
     println!("\n📦 Lambda Functions:");
+    let mut has_java = false;
     for f in &config.functions {
         println!("   • {} ({:?}) → {}", f.function_name, f.runtime, f.handler);
+        if f.runtime.is_java() {
+            has_java = true;
+        }
+    }
+
+    // Warn about Docker requirement for Java runtimes
+    if has_java {
+        let docker_ok = Docker::connect_with_local_defaults().is_ok();
+        if docker_ok {
+            println!("   🐳 Java functions detected — Docker will be used for invocation");
+        } else {
+            println!("   ⚠️  Java functions detected but Docker is not available!");
+            println!("      Install Docker and start the daemon to invoke Java Lambdas.");
+            println!("      Other runtimes (Node.js, Python, Go, Rust) will work normally.");
+        }
     }
 
     // Compute gateway bindings (each gateway gets its own port when multiple exist)

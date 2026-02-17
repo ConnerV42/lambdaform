@@ -4,7 +4,7 @@
 
 > The only local Lambda tool that reads your Terraform
 
-**Lambdaform** is a Terraform-native local development server for AWS Lambda + API Gateway. No CloudFormation. No Docker. No LocalStack account. Just your Terraform files and your code.
+**Lambdaform** is a Terraform-native local development server for AWS Lambda + API Gateway. No CloudFormation. No LocalStack account. Just your Terraform files and your code. Most runtimes run natively — no Docker required. Java runtimes use Docker for JVM environment parity.
 
 ## Why?
 
@@ -15,12 +15,14 @@ If you use Terraform for Lambda infrastructure, your local development options a
 | LocalStack | ❌ | ⚠️ Limited | ❌ | ❌ (Pro) |
 | SAM CLI | ⚠️ Beta | ✅ | ❌ | ❌ |
 | serverless-offline | ❌ | ✅ | ⚠️ | ✅ |
-| **Lambdaform** | ✅ | ✅ | ✅ | ✅ |
+| **Lambdaform** | ✅ | ✅ | ✅¹ | ✅ |
+
+¹ *Node.js, Python, Go, and Rust run natively. Java runtimes use Docker for JVM parity.*
 
 ## Features
 
 - 📖 **Reads your Terraform** — no separate configuration file needed
-- ⚡ **Fast startup** — single binary, no Docker required
+- ⚡ **Fast startup** — single binary, no Docker required for most runtimes
 - 🔥 **Hot reload** — instant feedback on code and `.tf` changes
 - 🌐 **REST & HTTP APIs** — supports both API Gateway v1 (REST) and v2 (HTTP)
 - 🔒 **Lambda authorizers** — TOKEN and REQUEST authorizer support
@@ -90,6 +92,8 @@ $ curl -s localhost:3000/hello?name=World | jq .
 | Node.js 18.x / 20.x | ✅ | Warm pool (~3ms) |
 | Python 3.10 / 3.11 / 3.12 | ✅ | Warm pool (~3ms) |
 | Go 1.x / provided.al2 / provided.al2023 | ✅ | Mini RIE (~14ms) |
+| Rust (provided.al2023) | ✅ | Mini RIE (~14ms) |
+| Java 8/11/17/21 | ✅ | Docker (~500ms) |
 
 ## CLI Usage
 

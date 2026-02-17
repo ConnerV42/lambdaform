@@ -899,8 +899,16 @@ except Exception as e:
 
         let image = format!("public.ecr.aws/lambda/java:{}", docker_tag);
 
-        let docker =
-            Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
+        let docker = Docker::connect_with_local_defaults().context(
+            "Failed to connect to Docker daemon. Java Lambda runtimes require Docker.\n\
+             \n\
+             To fix this:\n\
+             1. Install Docker: https://docs.docker.com/get-docker/\n\
+             2. Start the Docker daemon: `docker info` to verify\n\
+             3. Ensure your user has permission: `sudo usermod -aG docker $USER`\n\
+             \n\
+             Other runtimes (Node.js, Python, Go, Rust) run natively without Docker.",
+        )?;
 
         // Check if image exists, pull if not
         if docker.inspect_image(&image).await.is_err() {
@@ -914,7 +922,13 @@ except Exception as e:
                 None,
             );
             while let Some(result) = stream.next().await {
-                result.with_context(|| format!("Failed to pull image {}", image))?;
+                result.with_context(|| {
+                    format!(
+                        "Failed to pull image {}. Check your internet connection.\n\
+                         This image is only needed on first run and is cached afterwards.",
+                        image
+                    )
+                })?;
             }
             tracing::info!("Image pulled: {}", image);
         }
