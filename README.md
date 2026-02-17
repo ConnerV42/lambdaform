@@ -308,6 +308,20 @@ Debug mode disables the warm process pool so breakpoints work correctly.
 - [x] SQS/SNS trigger simulation
 - [x] DynamoDB Local integration hints
 - [x] Step Functions visualization (read-only)
+- [x] Terraform variable resolution from `.tfvars`
+- [x] Terraform module support (local modules)
+- [x] `lambdaform init` — guided project setup
+- [x] `lambdaform replay` — request history and replay
+- [x] Structured JSON logging
+- [x] Environment variable and locals interpolation
+- [x] Terminal UI (ratatui dashboard)
+- [x] Rust runtime support (`provided.al2023`)
+- [x] Java/JVM runtime support (Docker)
+- [x] Plugin architecture (custom resource handlers)
+- [x] Cost estimation (`lambdaform cost`)
+- [x] Infrastructure graph (`lambdaform graph`)
+- [x] VS Code extension
+- [x] Comprehensive documentation site
 
 ## Contributing
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.0.0 — Ready for Teams (2026-02-16)
+
+🎉 **First stable release!** Lambdaform is production-ready for team adoption.
+
+**New features:**
+- Comprehensive documentation site (mdBook, 30+ pages, GitHub Pages deployment)
+- Rust runtime support (`provided.al2023` with auto-detect, cargo build integration, smart rebuild)
+- Java/JVM runtime support (Docker-based, `java8.al2`/`java11`/`java17`/`java21` via AWS Lambda base images)
+- VS Code extension (function explorer, one-click invoke, live log viewer, server control, status bar)
+- CI/CD integration guide (5 GitHub Actions patterns, 3 GitLab CI configs, test examples)
+- Plugin architecture (`lambdaform plugins` CLI, custom resource handlers, example S3 plugin)
+- Cost estimation (`lambdaform cost` — per-function breakdown, monthly projection, free tier, ARM pricing)
+- Infrastructure graph visualization (`lambdaform graph` — ASCII/DOT/JSON, detects all resource relationships)
+
+**Improvements:**
+- 125 tests passing (unit + integration)
+- Clippy-clean, zero warnings
+- 6 supported runtimes: Node.js, Python, Go, Rust, Java, custom
+
+**Supported runtimes:**
+| Runtime | Invocation |
+|---------|-----------|
+| Node.js 18.x / 20.x | Warm pool (~3ms) |
+| Python 3.10–3.12 | Warm pool (~3ms) |
+| Go 1.x / provided.al2/al2023 | Mini RIE (~14ms) |
+| Rust (provided.al2023) | Mini RIE (~14ms) |
+| Java 8/11/17/21 | Docker (~500ms) |
+
 ## v0.6.0 — Developer Experience (2026-02-16)
 
 **New features:**
