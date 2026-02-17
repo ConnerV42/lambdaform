@@ -201,6 +201,25 @@ enum Commands {
         json: bool,
     },
 
+    /// Estimate AWS Lambda invocation costs from local usage
+    Cost {
+        /// Directory containing Terraform files (with .lambdaform/)
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+
+        /// Architecture for pricing (x86 or arm)
+        #[arg(short, long, default_value = "x86")]
+        arch: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Additional .tfvars files to load (like terraform -var-file)
+        #[arg(long = "var-file", value_name = "FILE")]
+        var_files: Vec<PathBuf>,
+    },
+
     /// Visualize Step Functions state machines (read-only)
     #[command(name = "stepfunctions", alias = "sfn")]
     StepFunctions {
@@ -314,6 +333,12 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(cmd_plugins(dir, json))
         }
+        Commands::Cost {
+            dir,
+            arch,
+            json,
+            var_files,
+        } => cmd_cost(dir, arch, json, var_files),
         Commands::StepFunctions { dir, name, json } => cmd_stepfunctions(dir, name, json),
         Commands::Init { dir, yes } => cmd_init(dir, yes),
         Commands::Replay {
@@ -1249,6 +1274,56 @@ async fn cmd_plugins(dir: PathBuf, json_output: bool) -> anyhow::Result<()> {
             println!("  {}. {}", i + 1, name);
         }
         println!("\nUse --json for detailed output.");
+    }
+
+    Ok(())
+}
+
+fn cmd_cost(
+    dir: PathBuf,
+    arch: String,
+    json_output: bool,
+    var_files: Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    use lambdaform::cost;
+    use lambdaform::history;
+
+    let architecture = match arch.to_lowercase().as_str() {
+        "arm" | "arm64" | "graviton" => cost::Architecture::Arm,
+        _ => cost::Architecture::X86,
+    };
+
+    // Load history
+    let history_path = dir.join(".lambdaform").join("history.jsonl");
+    if !history_path.exists() {
+        println!("💰 Lambda Cost Estimation\n");
+        println!("  No request history found.");
+        println!("  Run `lambdaform start` and make some requests first.");
+        println!("  History is recorded to .lambdaform/history.jsonl\n");
+        return Ok(());
+    }
+
+    let entries = history::load_history(&history_path)?;
+    if entries.is_empty() {
+        println!("💰 Lambda Cost Estimation\n");
+        println!("  History file exists but contains no entries.");
+        println!("  Make some requests to your local server first.\n");
+        return Ok(());
+    }
+
+    // Parse Terraform to get function memory configs
+    let config = parser::parse_terraform_dir_with_var_files(&dir, &var_files)
+        .unwrap_or_else(|_| config::LambdaformConfig::default());
+
+    let report = cost::estimate_costs(&entries, &config.functions, architecture);
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&cost::format_report_json(&report))?
+        );
+    } else {
+        print!("{}", cost::format_report(&report));
     }
 
     Ok(())

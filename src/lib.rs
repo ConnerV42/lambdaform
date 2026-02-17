@@ -1,6 +1,7 @@
 //! Lambdaform - Terraform-native local Lambda emulator (library)
 
 pub mod config;
+pub mod cost;
 pub mod history;
 pub mod parser;
 pub mod plugin;
