@@ -3,6 +3,13 @@
 //! Spawns local processes to execute Lambda handlers.
 
 use anyhow::{Context, Result};
+use bollard::container::{
+    Config as ContainerConfig, CreateContainerOptions, RemoveContainerOptions,
+};
+use bollard::image::CreateImageOptions;
+use bollard::models::{HostConfig, PortBinding};
+use bollard::Docker;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -475,6 +482,10 @@ impl FunctionExecutor {
                 self.invoke_custom_with_rie(&serde_json::to_value(&event)?)
                     .await?
             }
+            rt if rt.is_java() => {
+                self.invoke_java_docker(&serde_json::to_value(&event)?)
+                    .await?
+            }
             _ => {
                 anyhow::bail!(
                     "Unsupported runtime for authorizer: {:?}",
@@ -871,6 +882,218 @@ except Exception as e:
         Ok(result)
     }
 
+    /// Invoke a Java Lambda function via Docker using AWS Lambda base images.
+    ///
+    /// Pulls the appropriate `public.ecr.aws/lambda/java:XX` image, creates a container
+    /// with the source directory mounted at `/var/task`, exposes port 8080, and POSTs
+    /// the event JSON to the Lambda Runtime Interface Client built into the base image.
+    async fn invoke_java_docker(
+        &self,
+        event_json: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let docker_tag = self
+            .config
+            .runtime
+            .java_docker_tag()
+            .ok_or_else(|| anyhow::anyhow!("Not a Java runtime: {:?}", self.config.runtime))?;
+
+        let image = format!("public.ecr.aws/lambda/java:{}", docker_tag);
+
+        let docker =
+            Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
+
+        // Check if image exists, pull if not
+        if docker.inspect_image(&image).await.is_err() {
+            tracing::info!("Pulling Docker image: {}", image);
+            let mut stream = docker.create_image(
+                Some(CreateImageOptions {
+                    from_image: image.clone(),
+                    ..Default::default()
+                }),
+                None,
+                None,
+            );
+            while let Some(result) = stream.next().await {
+                result.with_context(|| format!("Failed to pull image {}", image))?;
+            }
+            tracing::info!("Image pulled: {}", image);
+        }
+
+        // Build env vars
+        let mut env_vars: Vec<String> = self
+            .env_with_layers()
+            .into_iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        env_vars.push(format!("_HANDLER={}", self.config.handler));
+
+        // Build bind mounts
+        let source_dir = self.source_dir.canonicalize().with_context(|| {
+            format!("Source directory not found: {}", self.source_dir.display())
+        })?;
+        let mut binds = vec![format!("{}:/var/task:ro", source_dir.display())];
+
+        // Mount layer paths to /opt
+        for (i, layer_path) in self.layer_paths.iter().enumerate() {
+            if let Ok(canonical) = layer_path.canonicalize() {
+                binds.push(format!("{}:/opt/layer{}", canonical.display(), i));
+            }
+        }
+
+        let mut port_bindings = HashMap::new();
+        port_bindings.insert(
+            "8080/tcp".to_string(),
+            Some(vec![PortBinding {
+                host_ip: Some("127.0.0.1".to_string()),
+                host_port: Some("0".to_string()), // random port
+            }]),
+        );
+
+        let container_name = format!("lambdaform-java-{}", uuid_simple());
+
+        let container = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: container_name.as_str(),
+                    platform: None,
+                }),
+                ContainerConfig {
+                    image: Some(image.clone()),
+                    env: Some(env_vars.to_vec()),
+                    cmd: Some(vec![self.config.handler.clone()]),
+                    host_config: Some(HostConfig {
+                        binds: Some(binds),
+                        port_bindings: Some(port_bindings),
+                        ..Default::default()
+                    }),
+                    exposed_ports: Some({
+                        let mut m = HashMap::new();
+                        m.insert("8080/tcp".to_string(), HashMap::new());
+                        m
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .context("Failed to create Docker container")?;
+
+        let container_id = container.id;
+
+        // Ensure cleanup on all paths
+        let cleanup = |docker: &Docker, id: &str| {
+            let docker = docker.clone();
+            let id = id.to_string();
+            async move {
+                docker.stop_container(&id, None).await.ok();
+                docker
+                    .remove_container(
+                        &id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .ok();
+            }
+        };
+
+        docker
+            .start_container::<String>(&container_id, None)
+            .await
+            .map_err(|e| {
+                let docker_c = docker.clone();
+                let id_c = container_id.clone();
+                tokio::spawn(async move {
+                    cleanup(&docker_c, &id_c).await;
+                });
+                anyhow::anyhow!("Failed to start container: {}", e)
+            })?;
+
+        // Get the mapped host port
+        let inspect = docker
+            .inspect_container(&container_id, None)
+            .await
+            .context("Failed to inspect container")?;
+
+        let host_port = inspect
+            .network_settings
+            .as_ref()
+            .and_then(|ns| ns.ports.as_ref())
+            .and_then(|ports| ports.get("8080/tcp"))
+            .and_then(|bindings| bindings.as_ref())
+            .and_then(|bindings| bindings.first())
+            .and_then(|binding| binding.host_port.as_ref())
+            .and_then(|p| p.parse::<u16>().ok())
+            .ok_or_else(|| anyhow::anyhow!("Could not determine mapped port for container"))?;
+
+        let url = format!(
+            "http://127.0.0.1:{}/2015-03-31/functions/function/invocations",
+            host_port
+        );
+        let event_bytes = serde_json::to_vec(event_json)?;
+
+        // Retry POST until RIC is ready (up to timeout)
+        let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
+        let start = std::time::Instant::now();
+
+        let response_body = loop {
+            if start.elapsed() > timeout_duration {
+                cleanup(&docker, &container_id).await;
+                anyhow::bail!(
+                    "Java Lambda timed out after {}s waiting for container",
+                    self.config.timeout
+                );
+            }
+
+            match Self::http_post(&url, &event_bytes).await {
+                Ok(body) => break body,
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        };
+
+        cleanup(&docker, &container_id).await;
+
+        let result: serde_json::Value =
+            serde_json::from_slice(&response_body).unwrap_or(serde_json::Value::Null);
+
+        Ok(result)
+    }
+
+    /// HTTP POST using hyper (no external binaries)
+    async fn http_post(url: &str, body: &[u8]) -> Result<Vec<u8>> {
+        use http_body_util::BodyExt;
+        use http_body_util::Full;
+        use hyper::body::Bytes;
+        use hyper_util::client::legacy::Client;
+        use hyper_util::rt::TokioExecutor;
+
+        let client = Client::builder(TokioExecutor::new()).build_http();
+
+        let req = hyper::Request::builder()
+            .method(hyper::Method::POST)
+            .uri(url)
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::copy_from_slice(body)))
+            .context("Failed to build HTTP request")?;
+
+        let resp = client
+            .request(req)
+            .await
+            .context("Failed to POST to Lambda container")?;
+
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .context("Failed to read response body")?
+            .to_bytes();
+
+        Ok(body.to_vec())
+    }
+
     /// Invoke the Lambda function with an event
     /// Invoke with a raw JSON event (for SQS/SNS/DynamoDB triggers — not API Gateway format)
     pub async fn invoke_raw_event(
@@ -931,6 +1154,7 @@ except Exception as e:
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
                 self.invoke_custom_with_rie(&payload["event"]).await
             }
+            rt if rt.is_java() => self.invoke_java_docker(&raw_event).await,
             _ => {
                 anyhow::bail!("Unsupported runtime: {:?}", self.config.runtime)
             }
@@ -992,6 +1216,12 @@ except Exception as e:
             }
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
                 self.invoke_custom_runtime(&payload).await
+            }
+            rt if rt.is_java() => {
+                let event_json = serde_json::to_value(&event)?;
+                let result = self.invoke_java_docker(&event_json).await?;
+                let response: LambdaResponse = serde_json::from_value(result)?;
+                Ok(response)
             }
             _ => {
                 anyhow::bail!("Unsupported runtime: {:?}", self.config.runtime)
@@ -1603,6 +1833,45 @@ mod tests {
             executor.detect_custom_runtime_type(),
             CustomRuntimeType::Rust
         );
+    }
+
+    #[test]
+    fn test_java_runtime_variants() {
+        // Test from_str
+        assert_eq!(Runtime::from_str("java8.al2"), Runtime::Java8Al2);
+        assert_eq!(Runtime::from_str("java11"), Runtime::Java11);
+        assert_eq!(Runtime::from_str("java17"), Runtime::Java17);
+        assert_eq!(Runtime::from_str("java21"), Runtime::Java21);
+
+        // Test as_str roundtrip
+        assert_eq!(Runtime::Java8Al2.as_str(), "java8.al2");
+        assert_eq!(Runtime::Java11.as_str(), "java11");
+        assert_eq!(Runtime::Java17.as_str(), "java17");
+        assert_eq!(Runtime::Java21.as_str(), "java21");
+
+        // Test is_java
+        assert!(Runtime::Java8Al2.is_java());
+        assert!(Runtime::Java11.is_java());
+        assert!(Runtime::Java17.is_java());
+        assert!(Runtime::Java21.is_java());
+        assert!(!Runtime::Nodejs20.is_java());
+        assert!(!Runtime::Python312.is_java());
+
+        // Test serde roundtrip
+        let json = serde_json::to_string(&Runtime::Java17).unwrap();
+        assert_eq!(json, "\"java17\"");
+        let rt: Runtime = serde_json::from_str("\"java8.al2\"").unwrap();
+        assert_eq!(rt, Runtime::Java8Al2);
+    }
+
+    #[test]
+    fn test_java_docker_image_tag() {
+        assert_eq!(Runtime::Java8Al2.java_docker_tag(), Some("8.al2"));
+        assert_eq!(Runtime::Java11.java_docker_tag(), Some("11"));
+        assert_eq!(Runtime::Java17.java_docker_tag(), Some("17"));
+        assert_eq!(Runtime::Java21.java_docker_tag(), Some("21"));
+        assert_eq!(Runtime::Nodejs20.java_docker_tag(), None);
+        assert_eq!(Runtime::Python312.java_docker_tag(), None);
     }
 
     #[test]

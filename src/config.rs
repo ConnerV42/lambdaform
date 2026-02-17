@@ -254,6 +254,14 @@ pub enum Runtime {
     ProvidedAl2,
     #[serde(rename = "provided.al2023")]
     ProvidedAl2023,
+    #[serde(rename = "java8.al2")]
+    Java8Al2,
+    #[serde(rename = "java11")]
+    Java11,
+    #[serde(rename = "java17")]
+    Java17,
+    #[serde(rename = "java21")]
+    Java21,
     /// Unknown runtime (will attempt to run anyway)
     Unknown(String),
 }
@@ -270,6 +278,10 @@ impl Runtime {
             "go1.x" => Runtime::Go1,
             "provided.al2" => Runtime::ProvidedAl2,
             "provided.al2023" => Runtime::ProvidedAl2023,
+            "java8.al2" => Runtime::Java8Al2,
+            "java11" => Runtime::Java11,
+            "java17" => Runtime::Java17,
+            "java21" => Runtime::Java21,
             other => Runtime::Unknown(other.to_string()),
         }
     }
@@ -284,6 +296,10 @@ impl Runtime {
             Runtime::Go1 => "go1.x",
             Runtime::ProvidedAl2 => "provided.al2",
             Runtime::ProvidedAl2023 => "provided.al2023",
+            Runtime::Java8Al2 => "java8.al2",
+            Runtime::Java11 => "java11",
+            Runtime::Java17 => "java17",
+            Runtime::Java21 => "java21",
             Runtime::Unknown(s) => s.as_str(),
         }
     }
@@ -297,6 +313,24 @@ impl Runtime {
             self,
             Runtime::Python310 | Runtime::Python311 | Runtime::Python312
         )
+    }
+
+    pub fn is_java(&self) -> bool {
+        matches!(
+            self,
+            Runtime::Java8Al2 | Runtime::Java11 | Runtime::Java17 | Runtime::Java21
+        )
+    }
+
+    /// Returns the Docker image tag for Java runtimes
+    pub fn java_docker_tag(&self) -> Option<&str> {
+        match self {
+            Runtime::Java8Al2 => Some("8.al2"),
+            Runtime::Java11 => Some("11"),
+            Runtime::Java17 => Some("17"),
+            Runtime::Java21 => Some("21"),
+            _ => None,
+        }
     }
 
     /// Returns true for custom/provided runtimes (Go, Rust, or any compiled binary)

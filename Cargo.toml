@@ -54,6 +54,7 @@ crossterm = { version = "0.28", optional = true }
 
 # Utilities
 anyhow = "1"
+bollard = "0.18"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "1"
 regex = "1"
