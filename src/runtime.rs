@@ -584,15 +584,23 @@ process.stdin.once('data', async (data) => {{
         drop(stdin);
 
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
-        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
+        let child_pid = child.id();
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                // Kill the child process to prevent zombie/leaked processes
+                if let Some(pid) = child_pid {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+                anyhow::bail!(
                     "Task timed out after {}.00 seconds (configured timeout: {}s)",
                     self.config.timeout,
                     self.config.timeout
-                )
-            })??;
+                );
+            }
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         for line in stdout.lines() {
@@ -655,15 +663,23 @@ except Exception as e:
         drop(stdin);
 
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
-        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
+        let child_pid = child.id();
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                // Kill the child process to prevent zombie/leaked processes
+                if let Some(pid) = child_pid {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+                anyhow::bail!(
                     "Task timed out after {}.00 seconds (configured timeout: {}s)",
                     self.config.timeout,
                     self.config.timeout
-                )
-            })??;
+                );
+            }
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         for line in stdout.lines() {
@@ -842,6 +858,15 @@ except Exception as e:
             axum::serve(listener, app).await.ok();
         });
 
+        // Guard ensures the RIE server is always cleaned up, even on early returns
+        struct AbortOnDrop(tokio::task::JoinHandle<()>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _server_guard = AbortOnDrop(server_handle);
+
         // Run the Go binary
         let mut child = Command::new(&binary_path)
             .current_dir(&self.source_dir)
@@ -860,9 +885,8 @@ except Exception as e:
         )
         .await;
 
-        // Kill the child process and server
+        // Kill the child process (server cleaned up by _server_guard drop)
         child.kill().await.ok();
-        server_handle.abort();
 
         if timeout.is_err() {
             anyhow::bail!("Go Lambda timed out after {}s", self.config.timeout);
@@ -1333,15 +1357,23 @@ process.stdin.once('data', async (data) => {{
 
         // Read response
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
-        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
+        let child_pid = child.id();
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                // Kill the child process to prevent zombie/leaked processes
+                if let Some(pid) = child_pid {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+                anyhow::bail!(
                     "Task timed out after {}.00 seconds (configured timeout: {}s)",
                     self.config.timeout,
                     self.config.timeout
-                )
-            })??;
+                );
+            }
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // Find JSON line in output
@@ -1456,15 +1488,23 @@ except Exception as e:
         drop(stdin);
 
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout as u64);
-        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
+        let child_pid = child.id();
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                // Kill the child process to prevent zombie/leaked processes
+                if let Some(pid) = child_pid {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+                anyhow::bail!(
                     "Task timed out after {}.00 seconds (configured timeout: {}s)",
                     self.config.timeout,
                     self.config.timeout
-                )
-            })??;
+                );
+            }
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         for line in stdout.lines() {
@@ -1564,11 +1604,7 @@ fn check_dir_newer(dir: &std::path::Path, than: std::time::SystemTime) -> bool {
 
 /// Generate a simple UUID-like string
 fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{:x}-{:x}", duration.as_secs(), duration.subsec_nanos())
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
