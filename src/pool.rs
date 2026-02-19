@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -82,7 +83,7 @@ type WorkerKey = (String, String);
 
 /// Pool of warm worker processes.
 pub struct ProcessPool {
-    workers: Mutex<HashMap<WorkerKey, Worker>>,
+    workers: Mutex<HashMap<WorkerKey, Arc<Mutex<Worker>>>>,
 }
 
 impl Default for ProcessPool {
@@ -119,29 +120,39 @@ impl ProcessPool {
                 .as_nanos()
         );
 
-        let mut workers = self.workers.lock().await;
+        // Lock the pool only to get/insert the worker handle, then release.
+        let worker_handle = {
+            let mut workers = self.workers.lock().await;
 
-        // Check if existing worker is alive
-        let needs_spawn = if let Some(w) = workers.get_mut(&key) {
-            if w.is_alive() {
-                false
+            // Check if existing worker is alive
+            let needs_spawn = if let Some(w) = workers.get(&key) {
+                let mut w = w.lock().await;
+                if w.is_alive() {
+                    false
+                } else {
+                    tracing::debug!("Worker for {} died, respawning", function_name);
+                    drop(w);
+                    workers.remove(&key);
+                    true
+                }
             } else {
-                tracing::debug!("Worker for {} died, respawning", function_name);
-                workers.remove(&key);
                 true
+            };
+
+            if needs_spawn {
+                let worker = spawn_worker(runtime, handler, source_dir, env)
+                    .await
+                    .with_context(|| format!("Failed to spawn worker for {}", function_name))?;
+                workers.insert(key.clone(), Arc::new(Mutex::new(worker)));
             }
-        } else {
-            true
+
+            Arc::clone(workers.get(&key).expect("Worker was just inserted"))
         };
+        // Pool mutex is now released — concurrent requests to OTHER functions proceed freely.
+        // The per-worker mutex serializes requests to the SAME function (necessary since
+        // stdin/stdout is a single stream), but doesn't block unrelated functions.
 
-        if needs_spawn {
-            let worker = spawn_worker(runtime, handler, source_dir, env)
-                .await
-                .with_context(|| format!("Failed to spawn worker for {}", function_name))?;
-            workers.insert(key.clone(), worker);
-        }
-
-        let worker = workers.get_mut(&key).expect("Worker was just inserted");
+        let mut worker = worker_handle.lock().await;
         let resp = worker.invoke(&id, event, context).await;
 
         // If invoke failed, remove the worker so it gets respawned next time
@@ -155,6 +166,8 @@ impl ProcessPool {
                 }
             }
             Err(e) => {
+                drop(worker);
+                let mut workers = self.workers.lock().await;
                 workers.remove(&key);
                 Err(e)
             }
@@ -164,9 +177,10 @@ impl ProcessPool {
     /// Kill all workers (for hot reload).
     pub async fn invalidate_all(&self) {
         let mut workers = self.workers.lock().await;
-        for (key, mut worker) in workers.drain() {
+        for (key, worker) in workers.drain() {
             tracing::debug!("Killing worker: {}:{}", key.0, key.1);
-            let _ = worker.child.kill().await;
+            let mut w = worker.lock().await;
+            let _ = w.child.kill().await;
         }
     }
 }
@@ -175,8 +189,10 @@ impl Drop for ProcessPool {
     fn drop(&mut self) {
         // Best-effort kill — we can't async here, so just start kill signals
         if let Ok(mut workers) = self.workers.try_lock() {
-            for (_, mut worker) in workers.drain() {
-                let _ = worker.child.start_kill();
+            for (_, worker) in workers.drain() {
+                if let Ok(mut w) = worker.try_lock() {
+                    let _ = w.child.start_kill();
+                }
             }
         }
     }

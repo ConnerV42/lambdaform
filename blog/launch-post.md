@@ -30,19 +30,34 @@ That's it. No config file needed (though `lambdaform.yaml` exists for overrides)
 
 ### What You Get
 
+**Core:**
 - **REST API Gateway (v1)** and **HTTP API Gateway (v2)** — both supported, with proper event format differences
 - **Lambda authorizers** — TOKEN and REQUEST types, so your auth flow works locally
 - **Hot reload** — change your handler code or `.tf` files, Lambdaform picks it up instantly
 - **Warm process pool** — ~3ms warm invocations after initial cold start
-- **Debugger integration** — `--inspect-brk` for Node.js, `debugpy` for Python, `delve` for Go
 - **WebSocket APIs** — `$connect`/`$disconnect`/custom routes with `@connections` management
 - **Lambda layers** — automatic path resolution
 - **SQS/SNS trigger simulation** — test event source mappings locally
 - **OpenTofu compatible** — works identically with both
 
-### Runtimes
+**Developer Experience:**
+- **Debugger integration** — `--inspect-brk` for Node.js, `debugpy` for Python, `delve` for Go
+- **Terraform variable resolution** — reads `.tfvars`, supports `--var-file`
+- **Local module support** — `source = "./modules/..."` just works
+- **`lambdaform init`** — guided setup, auto-detects project structure
+- **Request replay** — record and replay HTTP traffic for debugging
+- **Structured JSON logging** — `--json-log` for CI/pipeline integration
+- **Terminal UI** — optional live dashboard with color-coded request log
+- **Infrastructure graph** — `lambdaform graph` shows ASCII/DOT/JSON dependency visualization
+- **Cost estimation** — `lambdaform cost` projects monthly Lambda costs from local usage
 
-Node.js, Python, and Go — covering the vast majority of Lambda usage. Rust support (via `provided.al2023`) is on the roadmap.
+**Runtimes:**
+Node.js, Python, Go, and Rust run natively — no Docker required. Java/JVM runtimes use Docker for environment parity. That covers the vast majority of Lambda usage.
+
+**Ecosystem:**
+- **Plugin architecture** — extend with custom resource handlers
+- **VS Code extension** — function explorer, one-click invoke, live log viewer
+- **Homebrew, Cargo, npm** — install however you prefer
 
 ## The Approach: Parse HCL, Not Deploy It
 
@@ -90,20 +105,15 @@ Start the server:
 lambdaform start
 # 📦 Lambda Functions:
 #    • hello-world (Nodejs20) → index.handler
-#    • get-user (Nodejs20) → users.handler  
+#    • get-user (Nodejs20) → users.handler
 # 🔥 Server running at http://localhost:3000
 ```
 
-## What's Next
+## Battle-Tested
 
-Lambdaform is at v0.5.0. The core is solid — 62 tests passing, cross-platform CI, proper error handling, graceful shutdown. The roadmap includes:
+I've been dogfooding Lambdaform with [Civic Scanner](https://brief.connerv.com), a serverless app that scrapes and analyzes local government meeting minutes using Lambda + API Gateway + DynamoDB + Bedrock. Three Lambda functions, multiple API routes, real Terraform — Lambdaform handles the full local dev loop.
 
-- **Terraform variable resolution** from `.tfvars`
-- **Module support** for local Terraform modules  
-- **`lambdaform init`** for guided setup
-- **Request replay** for debugging
-- **Rust runtime** support
-- **VS Code extension**
+125 tests. Cross-platform CI (Linux, macOS ARM64 + x86_64). Proper error handling throughout.
 
 ## Open Source, No Tricks
 
@@ -112,5 +122,6 @@ MIT license. No paid tier. No feature gating. No telemetry.
 If local Lambda development with Terraform has frustrated you, give it a try:
 
 **GitHub:** [github.com/ConnerV42/lambdaform](https://github.com/ConnerV42/lambdaform)
+**Docs:** [connerv42.github.io/lambdaform](https://connerv42.github.io/lambdaform/)
 
 Feedback, issues, and PRs welcome.
