@@ -745,13 +745,35 @@ async fn handle_request(
                     source_ip: "127.0.0.1".to_string(),
                 },
             };
+            // Build multi-value query string parameters
+            let multi_value_query = if query.is_empty() {
+                None
+            } else {
+                let mut mv: HashMap<String, Vec<String>> = HashMap::new();
+                for (k, v) in &query {
+                    mv.entry(k.clone()).or_default().push(v.clone());
+                }
+                Some(mv)
+            };
+
+            // Build multi-value headers
+            let multi_value_headers = {
+                let mut mv: HashMap<String, Vec<String>> = HashMap::new();
+                for (k, v) in &headers_map {
+                    mv.entry(k.clone()).or_default().push(v.clone());
+                }
+                Some(mv)
+            };
+
             let event_v1 = LambdaEvent {
                 http_method: method.to_string(),
                 path: path.clone(),
                 resource: resource_path,
                 path_parameters: path_params,
                 query_string_parameters: query_params,
+                multi_value_query_string_parameters: multi_value_query,
                 headers: Some(headers_map),
+                multi_value_headers,
                 body: body_str,
                 is_base64_encoded: false,
                 request_context,

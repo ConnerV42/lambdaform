@@ -858,7 +858,9 @@ fn cmd_invoke(
             resource: "/".to_string(),
             path_parameters: None,
             query_string_parameters: None,
+            multi_value_query_string_parameters: None,
             headers: None,
+            multi_value_headers: None,
             body: Some(event_json),
             is_base64_encoded: false,
             request_context: runtime::RequestContext {

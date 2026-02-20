@@ -63,7 +63,9 @@ pub struct LambdaEvent {
     pub resource: String,
     pub path_parameters: Option<HashMap<String, String>>,
     pub query_string_parameters: Option<HashMap<String, String>>,
+    pub multi_value_query_string_parameters: Option<HashMap<String, Vec<String>>>,
     pub headers: Option<HashMap<String, String>>,
+    pub multi_value_headers: Option<HashMap<String, Vec<String>>>,
     pub body: Option<String>,
     pub is_base64_encoded: bool,
     pub request_context: RequestContext,
@@ -1794,7 +1796,12 @@ mod tests {
             resource: "/test".to_string(),
             path_parameters: None,
             query_string_parameters: Some(HashMap::from([("key".to_string(), "val".to_string())])),
+            multi_value_query_string_parameters: Some(HashMap::from([(
+                "key".to_string(),
+                vec!["val".to_string()],
+            )])),
             headers: None,
+            multi_value_headers: None,
             body: None,
             is_base64_encoded: false,
             request_context: RequestContext {
@@ -1887,7 +1894,9 @@ mod tests {
             resource: "/test".to_string(),
             path_parameters: None,
             query_string_parameters: None,
+            multi_value_query_string_parameters: None,
             headers: None,
+            multi_value_headers: None,
             body: None,
             is_base64_encoded: false,
             request_context: RequestContext {
