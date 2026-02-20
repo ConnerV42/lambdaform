@@ -139,4 +139,63 @@ mod tests {
         let change = process_event(&event, &[]);
         assert!(matches!(change, Some(FileChange::Terraform(_))));
     }
+
+    #[test]
+    fn test_lambdaform_yaml_detection() {
+        let event = DebouncedEvent {
+            path: std::path::PathBuf::from("/project/lambdaform.yaml"),
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
+        };
+
+        let change = process_event(&event, &[]);
+        assert!(matches!(change, Some(FileChange::Terraform(_))));
+    }
+
+    #[test]
+    fn test_lambdaform_yml_detection() {
+        let event = DebouncedEvent {
+            path: std::path::PathBuf::from("/project/lambdaform.yml"),
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
+        };
+
+        let change = process_event(&event, &[]);
+        assert!(matches!(change, Some(FileChange::Terraform(_))));
+    }
+
+    #[test]
+    fn test_random_yaml_not_detected() {
+        let event = DebouncedEvent {
+            path: std::path::PathBuf::from("/project/config.yaml"),
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
+        };
+
+        let change = process_event(&event, &[]);
+        assert!(change.is_none());
+    }
+
+    #[test]
+    fn test_source_file_detection() {
+        for ext in &["js", "ts", "py", "go", "rs"] {
+            let event = DebouncedEvent {
+                path: std::path::PathBuf::from(format!("/project/handler.{ext}")),
+                kind: notify_debouncer_mini::DebouncedEventKind::Any,
+            };
+            let change = process_event(&event, &[]);
+            assert!(
+                matches!(change, Some(FileChange::Source(_))),
+                "Expected Source for .{ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tfvars_detection() {
+        let event = DebouncedEvent {
+            path: std::path::PathBuf::from("/project/dev.tfvars"),
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
+        };
+
+        let change = process_event(&event, &[]);
+        assert!(matches!(change, Some(FileChange::Terraform(_))));
+    }
 }
