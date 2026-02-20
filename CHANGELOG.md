@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.0.1 — Pre-Launch QA (2026-02-20)
+
+Comprehensive QA sprint: 37 issues identified, 33 fixed, 4 deferred to post-launch.
+
+**Bug fixes (Critical — all fixed):**
+- Fix process leak on timeout (child processes now killed after timeout)
+- Fix pool worker deadlock under concurrent load (per-worker locking)
+- Fix UUID collisions under concurrent requests (switched to UUIDv4)
+- Fix RIE server leak on error paths (cleanup on spawn failure)
+
+**Bug fixes (High):**
+- Helpful errors for missing runtime binaries (node/python3 not found)
+- Fix hardcoded date in trigger timestamps (now uses real chrono timestamps)
+- Forward stderr in non-pool mode (console.log/print no longer silently dropped)
+- Fix WebSocket @connections port overflow (configurable, bounds-checked)
+- Complete API Gateway v2 event format (cookies, stageVariables)
+- Support `jsonencode()` + 12 Terraform functions in parser
+- Fix Python worker hang on import failure (startup handshake)
+- Improve source_path resolution for zip-based deploys
+- Handle `count`/`for_each` in parser (warns and continues)
+
+**Bug fixes (Medium):**
+- Add `multiValueQueryStringParameters` and `multiValueHeaders` to v1 events
+- Base64-encode binary request bodies in Lambda events
+- Remove `deny_unknown_fields` from ProjectConfig (forward compatibility)
+- Add 10MB request body size limit (matches AWS)
+- History file rotation (keep last 1000 entries)
+- Support `.tfvars.json` file format
+- Fix Go build target (builds for host platform, not hardcoded linux)
+- Fix nested module prefix at depth >2 (recursive prefixing)
+- Validate handler function exists at startup (warns if handler file missing)
+- Fix Step Functions `jsonencode` resolution
+
+**New features:**
+- `nodejs22.x` and `python3.13` runtime support
+- Trigger `--dry-run` flag
+- Config file hot-reload (watches `lambdaform.yaml` for changes)
+
+**Testing:**
+- Expanded from 125 to 162 tests (120 unit + 42 integration)
+- Added watcher tests (config detection, source files, tfvars)
+- Added parser tests (depth-3 modules, count/for_each, .tfvars.json)
+
 ## v1.0.0 — Ready for Teams (2026-02-16)
 
 🎉 **First stable release!** Lambdaform is production-ready for team adoption.
