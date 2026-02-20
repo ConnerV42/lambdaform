@@ -16,6 +16,7 @@ struct Worker {
     child: Child,
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
+    _stderr_drain: tokio::task::JoinHandle<()>,
 }
 
 impl Worker {
@@ -217,6 +218,31 @@ async fn spawn_worker(
     }
 }
 
+/// Spawn a background task that reads stderr line-by-line and forwards to tracing.
+/// This prevents the OS pipe buffer (typically 64KB) from filling up and blocking the worker.
+fn drain_stderr(
+    stderr: tokio::process::ChildStderr,
+    function_name: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    let trimmed = line.trim_end();
+                    if !trimmed.is_empty() {
+                        tracing::info!(target: "lambda", "[{}] {}", function_name, trimmed);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
 // Re-use shared handler parsing from runtime module
 use crate::runtime::{find_handler_file, parse_handler};
 
@@ -297,11 +323,17 @@ rl.on('line', async (line) => {{
             .take()
             .context("Failed to capture worker stdout")?,
     );
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to capture worker stderr")?;
+    let _stderr_drain = drain_stderr(stderr, "node-worker".to_string());
 
     Ok(Worker {
         child,
         stdin,
         stdout,
+        _stderr_drain,
     })
 }
 
@@ -422,10 +454,16 @@ for line in sys.stdin:
             .take()
             .context("Failed to capture worker stdout")?,
     );
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to capture worker stderr")?;
+    let _stderr_drain = drain_stderr(stderr, "python-worker".to_string());
 
     Ok(Worker {
         child,
         stdin,
         stdout,
+        _stderr_drain,
     })
 }
