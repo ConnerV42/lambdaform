@@ -21,6 +21,39 @@ use tokio::sync::{Mutex, Notify};
 use crate::config::{LambdaConfig, Runtime};
 use crate::pool::ProcessPool;
 
+/// Check that the required runtime binary is available in PATH.
+/// Returns a helpful error message with install instructions if missing.
+fn check_runtime_binary(runtime: &Runtime) -> Result<()> {
+    let (binary, install_hint) = match runtime {
+        Runtime::Nodejs18 | Runtime::Nodejs20 => (
+            "node",
+            "Install Node.js: https://nodejs.org/ or `nvm install --lts`",
+        ),
+        Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => (
+            "python3",
+            "Install Python 3: https://www.python.org/downloads/ or `brew install python3`",
+        ),
+        Runtime::Go1 => ("go", "Install Go: https://go.dev/dl/ or `brew install go`"),
+        rt if rt.is_java() => (
+            "docker",
+            "Java runtimes require Docker: https://docs.docker.com/get-docker/",
+        ),
+        // provided.al2/al2023 use cargo/go/prebuilt — checked separately
+        _ => return Ok(()),
+    };
+
+    match which::which(binary) {
+        Ok(_) => Ok(()),
+        Err(_) => anyhow::bail!(
+            "Runtime `{}` requires `{}` but it was not found in PATH.\n\n  {}\n\nMake sure `{}` is installed and available in your shell's PATH.",
+            runtime.as_str(),
+            binary,
+            install_hint,
+            binary
+        ),
+    }
+}
+
 /// Lambda event structure (API Gateway proxy format v1)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -455,6 +488,8 @@ impl FunctionExecutor {
 
     /// Invoke the Lambda function as an authorizer
     pub async fn invoke_authorizer(&self, event: AuthorizerEvent) -> Result<AuthorizerResult> {
+        check_runtime_binary(&self.config.runtime)?;
+
         let context = LambdaContext {
             function_name: self.config.function_name.clone(),
             function_version: "$LATEST".to_string(),
@@ -602,6 +637,12 @@ process.stdin.once('data', async (data) => {{
             }
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            for line in stderr.lines() {
+                tracing::warn!(target: "lambda_stderr", "{}: {}", self.config.function_name, line);
+            }
+        }
 
         for line in stdout.lines() {
             if let Ok(result) = serde_json::from_str::<RuntimeResult>(line) {
@@ -681,6 +722,12 @@ except Exception as e:
             }
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            for line in stderr.lines() {
+                tracing::warn!(target: "lambda_stderr", "{}: {}", self.config.function_name, line);
+            }
+        }
 
         for line in stdout.lines() {
             if let Ok(result) = serde_json::from_str::<RuntimeResult>(line) {
@@ -1200,6 +1247,8 @@ except Exception as e:
     }
 
     pub async fn invoke(&self, event: LambdaEvent) -> Result<LambdaResponse> {
+        check_runtime_binary(&self.config.runtime)?;
+
         let context = LambdaContext {
             function_name: self.config.function_name.clone(),
             function_version: "$LATEST".to_string(),
@@ -1375,6 +1424,12 @@ process.stdin.once('data', async (data) => {{
             }
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            for line in stderr.lines() {
+                tracing::warn!(target: "lambda_stderr", "{}: {}", self.config.function_name, line);
+            }
+        }
 
         // Find JSON line in output
         for line in stdout.lines() {
@@ -1506,6 +1561,12 @@ except Exception as e:
             }
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            for line in stderr.lines() {
+                tracing::warn!(target: "lambda_stderr", "{}: {}", self.config.function_name, line);
+            }
+        }
 
         for line in stdout.lines() {
             if let Ok(result) = serde_json::from_str::<RuntimeResult>(line) {
