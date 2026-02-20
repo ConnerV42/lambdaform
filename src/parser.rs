@@ -230,8 +230,156 @@ fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
         hcl::Expression::Number(n) => Some(n.to_string()),
         hcl::Expression::Bool(b) => Some(b.to_string()),
         hcl::Expression::TemplateExpr(t) => Some(t.to_string()),
+        hcl::Expression::FuncCall(func_call) => expr_func_call_to_string(func_call),
+        hcl::Expression::Array(items) => {
+            let json_items: Vec<serde_json::Value> =
+                items.iter().map(expr_to_json_value).collect();
+            serde_json::to_string(&json_items).ok()
+        }
+        hcl::Expression::Object(obj) => {
+            let json_obj = hcl_object_to_json(obj);
+            serde_json::to_string(&json_obj).ok()
+        }
         _ => None,
     }
+}
+
+/// Convert an HCL FuncCall expression to a string
+fn expr_func_call_to_string(func_call: &hcl::expr::FuncCall) -> Option<String> {
+    let name = func_call.name.to_string();
+    match name.as_str() {
+        "jsonencode" => {
+            if let Some(arg) = func_call.args.first() {
+                let json_val = expr_to_json_value(arg);
+                serde_json::to_string(&json_val).ok()
+            } else {
+                Some("null".to_string())
+            }
+        }
+        "tostring" => func_call.args.first().and_then(expr_to_string),
+        "tolist" | "toset" => {
+            if let Some(arg) = func_call.args.first() {
+                expr_to_string(arg)
+            } else {
+                Some("[]".to_string())
+            }
+        }
+        "lookup" => {
+            // lookup(map, key, default) — we can't resolve map lookups, return default if provided
+            func_call.args.get(2).and_then(expr_to_string)
+        }
+        "coalesce" => {
+            // Return first non-null argument
+            for arg in &func_call.args {
+                if let Some(val) = expr_to_string(arg) {
+                    if !val.is_empty() {
+                        return Some(val);
+                    }
+                }
+            }
+            None
+        }
+        "format" => {
+            // format(fmt, args...) — best effort: if format string is simple, just return it
+            func_call.args.first().and_then(expr_to_string)
+        }
+        "join" => {
+            // join(separator, list) — try to join if we can resolve both
+            if let (Some(sep), Some(list_str)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                // If the list resolved to a JSON array, join it
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(&list_str) {
+                    return Some(arr.join(&sep));
+                }
+                Some(list_str)
+            } else {
+                None
+            }
+        }
+        "replace" => {
+            // replace(string, search, replace) — best effort
+            if let (Some(s), Some(search), Some(repl)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+                func_call.args.get(2).and_then(expr_to_string),
+            ) {
+                Some(s.replace(&search, &repl))
+            } else {
+                None
+            }
+        }
+        "lower" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .map(|s| s.to_lowercase()),
+        "upper" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .map(|s| s.to_uppercase()),
+        "trimspace" | "trim" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .map(|s| s.trim().to_string()),
+        _ => None, // Unknown function — can't resolve
+    }
+}
+
+/// Convert an HCL expression to a serde_json::Value for jsonencode support
+fn expr_to_json_value(expr: &hcl::Expression) -> serde_json::Value {
+    match expr {
+        hcl::Expression::Null => serde_json::Value::Null,
+        hcl::Expression::Bool(b) => serde_json::Value::Bool(*b),
+        hcl::Expression::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                serde_json::Value::Number(serde_json::Number::from(i))
+            } else if let Some(f) = n.as_f64() {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        hcl::Expression::String(s) => serde_json::Value::String(s.to_string()),
+        hcl::Expression::TemplateExpr(t) => serde_json::Value::String(t.to_string()),
+        hcl::Expression::Array(items) => {
+            serde_json::Value::Array(items.iter().map(expr_to_json_value).collect())
+        }
+        hcl::Expression::Object(obj) => {
+            let map = hcl_object_to_json(obj);
+            serde_json::Value::Object(map)
+        }
+        hcl::Expression::FuncCall(func_call) => {
+            // Nested function calls (e.g. jsonencode within jsonencode)
+            if let Some(s) = expr_func_call_to_string(func_call) {
+                serde_json::Value::String(s)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Convert an HCL Object to a JSON map
+fn hcl_object_to_json(
+    obj: &hcl::expr::Object<hcl::expr::ObjectKey, hcl::Expression>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for (key, value) in obj.iter() {
+        let key_str = match key {
+            hcl::expr::ObjectKey::Identifier(id) => id.to_string(),
+            hcl::expr::ObjectKey::Expression(expr) => expr_to_string(expr).unwrap_or_default(),
+            _ => String::new(),
+        };
+        map.insert(key_str, expr_to_json_value(value));
+    }
+    map
 }
 
 /// Parse all Terraform files in a directory

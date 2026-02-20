@@ -2,7 +2,7 @@
 //!
 //! Matches incoming HTTP requests to Lambda functions.
 
-use crate::config::{ApiGatewayConfig, HttpMethod, LambdaConfig, RouteConfig};
+use crate::config::{ApiGatewayConfig, ApiType, HttpMethod, LambdaConfig, RouteConfig};
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -34,6 +34,9 @@ struct CompiledRoute {
 
     /// Optional authorizer function resource name
     authorizer_function_resource: Option<String>,
+
+    /// API type (REST v1 or HTTP v2)
+    api_type: ApiType,
 }
 
 /// Route match result
@@ -49,6 +52,9 @@ pub struct RouteMatch<'a> {
 
     /// Original resource path template (e.g., /users/{id})
     pub resource_path: Option<String>,
+
+    /// API type (REST v1 or HTTP v2)
+    pub api_type: ApiType,
 }
 
 impl Router {
@@ -64,6 +70,7 @@ impl Router {
         for gateway in gateways {
             for route in &gateway.routes {
                 if let Some(mut compiled) = compile_route(route) {
+                    compiled.api_type = gateway.api_type.clone();
                     // Attach authorizer function resource if it's a Lambda authorizer
                     compiled.authorizer_function_resource =
                         route.authorizer.as_ref().and_then(|a| {
@@ -115,6 +122,7 @@ impl Router {
                         path_params,
                         authorizer_function,
                         resource_path: Some(route.path_pattern.clone()),
+                        api_type: route.api_type.clone(),
                     });
                 }
             }
@@ -167,6 +175,7 @@ fn compile_route(route: &RouteConfig) -> Option<CompiledRoute> {
         method: route.method.clone(),
         function_resource: route.function_resource.clone(),
         authorizer_function_resource: None, // Set by Router::new after compilation
+        api_type: ApiType::Rest,            // Overridden by Router::new with gateway's type
     })
 }
 

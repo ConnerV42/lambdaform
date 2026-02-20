@@ -89,6 +89,57 @@ pub struct RequestIdentity {
     pub source_ip: String,
 }
 
+/// Lambda event structure (API Gateway v2 / HTTP API format)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LambdaEventV2 {
+    pub version: String,
+    pub route_key: String,
+    pub raw_path: String,
+    pub raw_query_string: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cookies: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_parameters: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_string_parameters: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_variables: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub is_base64_encoded: bool,
+    pub request_context: RequestContextV2,
+}
+
+/// API Gateway v2 request context
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestContextV2 {
+    pub stage: String,
+    pub request_id: String,
+    pub api_id: String,
+    pub route_key: String,
+    pub account_id: String,
+    pub domain_name: String,
+    pub domain_prefix: String,
+    pub time: String,
+    pub time_epoch: u64,
+    pub http: RequestContextHttp,
+}
+
+/// HTTP details within v2 request context
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestContextHttp {
+    pub method: String,
+    pub path: String,
+    pub protocol: String,
+    pub source_ip: String,
+    pub user_agent: String,
+}
+
 /// Lambda context structure
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -13,12 +13,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::config::ApiType;
 use crate::config::{ApiGatewayConfig, LambdaConfig, LambdaformConfig};
 use crate::history::HistoryRecorder;
 use crate::pool::ProcessPool;
 use crate::project_config::CorsConfig;
 use crate::router::Router as LambdaRouter;
-use crate::runtime::{DebugOptions, FunctionExecutor, LambdaEvent};
+use crate::runtime::{DebugOptions, FunctionExecutor, LambdaEvent, LambdaEventV2};
 
 /// Global plugin manager for custom resource handlers
 static PLUGIN_MANAGER: std::sync::OnceLock<Arc<crate::plugin::PluginManager>> =
@@ -644,53 +645,119 @@ async fn handle_request(
         .clone()
         .unwrap_or_else(|| path.clone());
 
-    // Build request context (matches real AWS API Gateway)
-    let request_context = crate::runtime::RequestContext {
-        stage: "local".to_string(),
-        resource_path: resource_path.clone(),
-        http_method: method.to_string(),
-        request_id: format!(
-            "lambdaform-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ),
-        api_id: "lambdaform".to_string(),
-        path: path.clone(),
-        identity: crate::runtime::RequestIdentity {
-            source_ip: "127.0.0.1".to_string(),
-        },
+    let request_id = format!(
+        "lambdaform-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    let headers_map: HashMap<String, String> = headers
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    let path_params = if matched.path_params.is_empty() {
+        None
+    } else {
+        Some(matched.path_params)
     };
 
-    // Build Lambda event
-    let event = LambdaEvent {
-        http_method: method.to_string(),
-        path: path.clone(),
-        resource: resource_path,
-        path_parameters: if matched.path_params.is_empty() {
-            None
-        } else {
-            Some(matched.path_params)
-        },
-        query_string_parameters: if query.is_empty() {
-            None
-        } else {
-            Some(query.clone())
-        },
-        headers: Some(
-            headers
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect(),
-        ),
-        body: if body.is_empty() {
-            None
-        } else {
-            Some(String::from_utf8_lossy(&body).to_string())
-        },
-        is_base64_encoded: false,
-        request_context,
+    let query_params = if query.is_empty() {
+        None
+    } else {
+        Some(query.clone())
+    };
+
+    let body_str = if body.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&body).to_string())
+    };
+
+    // Build event based on API type (v1 REST vs v2 HTTP)
+    let event: serde_json::Value = match matched.api_type {
+        ApiType::Http => {
+            // API Gateway v2 (HTTP API) event format
+            let route_key = format!("{} {}", method, resource_path);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            // Extract cookies from Cookie header
+            let cookies = headers_map.get("cookie").map(|cookie_header| {
+                cookie_header
+                    .split(';')
+                    .map(|c| c.trim().to_string())
+                    .collect::<Vec<String>>()
+            });
+            let event_v2 = LambdaEventV2 {
+                version: "2.0".to_string(),
+                route_key: route_key.clone(),
+                raw_path: path.clone(),
+                raw_query_string: query
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join("&"),
+                cookies,
+                path_parameters: path_params,
+                query_string_parameters: query_params,
+                stage_variables: None,
+                headers: Some(headers_map),
+                body: body_str,
+                is_base64_encoded: false,
+                request_context: crate::runtime::RequestContextV2 {
+                    stage: "$default".to_string(),
+                    request_id: request_id.clone(),
+                    api_id: "lambdaform".to_string(),
+                    route_key,
+                    account_id: "123456789012".to_string(),
+                    domain_name: "localhost".to_string(),
+                    domain_prefix: "lambdaform".to_string(),
+                    time: format_timestamp(),
+                    time_epoch: now.as_millis() as u64,
+                    http: crate::runtime::RequestContextHttp {
+                        method: method.to_string(),
+                        path: path.clone(),
+                        protocol: "HTTP/1.1".to_string(),
+                        source_ip: "127.0.0.1".to_string(),
+                        user_agent: headers
+                            .get("user-agent")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("lambdaform/local")
+                            .to_string(),
+                    },
+                },
+            };
+            serde_json::to_value(event_v2).unwrap_or_default()
+        }
+        _ => {
+            // API Gateway v1 (REST API) event format
+            let request_context = crate::runtime::RequestContext {
+                stage: "local".to_string(),
+                resource_path: resource_path.clone(),
+                http_method: method.to_string(),
+                request_id,
+                api_id: "lambdaform".to_string(),
+                path: path.clone(),
+                identity: crate::runtime::RequestIdentity {
+                    source_ip: "127.0.0.1".to_string(),
+                },
+            };
+            let event_v1 = LambdaEvent {
+                http_method: method.to_string(),
+                path: path.clone(),
+                resource: resource_path,
+                path_parameters: path_params,
+                query_string_parameters: query_params,
+                headers: Some(headers_map),
+                body: body_str,
+                is_base64_encoded: false,
+                request_context,
+            };
+            serde_json::to_value(event_v1).unwrap_or_default()
+        }
     };
 
     // Clone what we need before dropping the lock
@@ -812,7 +879,12 @@ async fn handle_request(
         event
     };
 
-    match executor.invoke(event).await {
+    let invoke_result = executor.invoke_raw_event(event).await.and_then(|raw| {
+        serde_json::from_value::<crate::runtime::LambdaResponse>(raw)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Lambda response: {}", e))
+    });
+
+    match invoke_result {
         Ok(response) => {
             let duration = request_start.elapsed();
             let status = StatusCode::from_u16(response.status_code).unwrap_or(StatusCode::OK);
