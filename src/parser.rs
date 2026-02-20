@@ -232,8 +232,7 @@ fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
         hcl::Expression::TemplateExpr(t) => Some(t.to_string()),
         hcl::Expression::FuncCall(func_call) => expr_func_call_to_string(func_call),
         hcl::Expression::Array(items) => {
-            let json_items: Vec<serde_json::Value> =
-                items.iter().map(expr_to_json_value).collect();
+            let json_items: Vec<serde_json::Value> = items.iter().map(expr_to_json_value).collect();
             serde_json::to_string(&json_items).ok()
         }
         hcl::Expression::Object(obj) => {

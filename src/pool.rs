@@ -243,6 +243,58 @@ fn drain_stderr(
     })
 }
 
+/// Wait for the worker startup handshake (ready signal) with a timeout.
+async fn wait_for_handshake(
+    stdout: &mut BufReader<tokio::process::ChildStdout>,
+    runtime_name: &str,
+) -> Result<()> {
+    let mut line = String::new();
+    let read_result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        stdout
+            .read_line(&mut line)
+            .await
+            .context("Failed to read handshake from worker")
+    })
+    .await;
+
+    match read_result {
+        Err(_) => anyhow::bail!(
+            "{} worker failed to start within 30s (possible import hang — check for network calls or blocking operations at module level)",
+            runtime_name
+        ),
+        Ok(Err(e)) => return Err(e),
+        Ok(Ok(0)) => anyhow::bail!(
+            "{} worker exited during startup (check stderr for import/syntax errors)",
+            runtime_name
+        ),
+        Ok(Ok(_)) => {}
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Handshake {
+        ready: bool,
+        error: Option<String>,
+    }
+
+    let hs: Handshake = serde_json::from_str(line.trim()).with_context(|| {
+        format!(
+            "Invalid handshake from {} worker: {}",
+            runtime_name,
+            line.trim()
+        )
+    })?;
+
+    if !hs.ready {
+        anyhow::bail!(
+            "{} worker failed to initialize: {}",
+            runtime_name,
+            hs.error.unwrap_or_else(|| "unknown error".to_string())
+        );
+    }
+
+    Ok(())
+}
+
 // Re-use shared handler parsing from runtime module
 use crate::runtime::{find_handler_file, parse_handler};
 
@@ -278,8 +330,18 @@ function sendResponse(obj) {{
     _origWrite(JSON.stringify(obj) + '\n');
 }}
 
-const handler = require('{}');
-const handlerFn = handler['{}'];
+let handlerFn;
+try {{
+    const handler = require('{handler_path}');
+    handlerFn = handler['{func}'];
+    if (typeof handlerFn !== 'function') {{
+        throw new Error('Handler {func} is not a function (got ' + typeof handlerFn + ')');
+    }}
+    sendResponse({{ ready: true }});
+}} catch (e) {{
+    sendResponse({{ ready: false, error: e.message }});
+    process.exit(1);
+}}
 
 const rl = readline.createInterface({{ input: process.stdin, terminal: false }});
 
@@ -298,8 +360,8 @@ rl.on('line', async (line) => {{
     }}
 }});
 "#,
-        handler_path.display(),
-        func
+        handler_path = handler_path.display(),
+        func = func
     );
 
     let mut child = Command::new("node")
@@ -317,7 +379,7 @@ rl.on('line', async (line) => {{
         .stdin
         .take()
         .context("Failed to capture worker stdin")?;
-    let stdout = BufReader::new(
+    let mut stdout = BufReader::new(
         child
             .stdout
             .take()
@@ -328,6 +390,8 @@ rl.on('line', async (line) => {{
         .take()
         .context("Failed to capture worker stderr")?;
     let _stderr_drain = drain_stderr(stderr, "node-worker".to_string());
+
+    wait_for_handshake(&mut stdout, "Node.js").await?;
 
     Ok(Worker {
         child,
@@ -407,10 +471,19 @@ import importlib.util
 _real_stdout = os.fdopen(os.dup(1), 'w')
 sys.stdout = sys.stderr  # print() goes to stderr now
 
-spec = importlib.util.spec_from_file_location("handler", "{}")
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-handler_fn = getattr(module, "{}")
+try:
+    spec = importlib.util.spec_from_file_location("handler", "{handler_path}")
+    if spec is None:
+        raise ImportError("Could not find module: {handler_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    handler_fn = getattr(module, "{func}")
+    _real_stdout.write(json.dumps({{"ready": True}}) + "\n")
+    _real_stdout.flush()
+except Exception as e:
+    _real_stdout.write(json.dumps({{"ready": False, "error": str(e)}}) + "\n")
+    _real_stdout.flush()
+    sys.exit(1)
 
 for line in sys.stdin:
     line = line.strip()
@@ -428,8 +501,8 @@ for line in sys.stdin:
         _real_stdout.write(json.dumps({{"id": req["id"], "success": False, "error": str(e)}}) + "\n")
         _real_stdout.flush()
 "#,
-        handler_path.display(),
-        func
+        handler_path = handler_path.display(),
+        func = func
     );
 
     let mut child = Command::new("python3")
@@ -448,7 +521,7 @@ for line in sys.stdin:
         .stdin
         .take()
         .context("Failed to capture worker stdin")?;
-    let stdout = BufReader::new(
+    let mut stdout = BufReader::new(
         child
             .stdout
             .take()
@@ -459,6 +532,8 @@ for line in sys.stdin:
         .take()
         .context("Failed to capture worker stderr")?;
     let _stderr_drain = drain_stderr(stderr, "python-worker".to_string());
+
+    wait_for_handshake(&mut stdout, "Python").await?;
 
     Ok(Worker {
         child,
