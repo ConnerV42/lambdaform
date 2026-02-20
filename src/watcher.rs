@@ -101,6 +101,14 @@ fn process_event(event: &DebouncedEvent, ignore_patterns: &[String]) -> Option<F
 
     match extension {
         "tf" | "tfvars" => Some(FileChange::Terraform(path.clone())),
+        "yaml" | "yml"
+            if path
+                .file_name()
+                .map(|f| f.to_string_lossy().contains("lambdaform"))
+                .unwrap_or(false) =>
+        {
+            Some(FileChange::Terraform(path.clone()))
+        }
         "js" | "ts" | "mjs" | "cjs" | "py" | "go" | "rs" => Some(FileChange::Source(path.clone())),
         _ => None,
     }

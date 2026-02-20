@@ -140,6 +140,10 @@ enum Commands {
         /// Override target function (skip event source mapping lookup)
         #[arg(short, long)]
         function: Option<String>,
+
+        /// Show the generated event payload without invoking the function
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Initialize a new Lambdaform project (generates lambdaform.yaml)
@@ -342,6 +346,7 @@ fn main() -> anyhow::Result<()> {
             batch,
             dir,
             function,
+            dry_run,
         } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(cmd_trigger(
@@ -351,6 +356,7 @@ fn main() -> anyhow::Result<()> {
                 batch,
                 dir,
                 function,
+                dry_run,
             ))
         }
         Commands::Plugins { dir, json } => {
@@ -1249,6 +1255,7 @@ async fn cmd_trigger(
     batch: u32,
     dir: PathBuf,
     function: Option<String>,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     println!("📨 Lambdaform Trigger Simulation\n");
 
@@ -1307,6 +1314,12 @@ async fn cmd_trigger(
             ),
         };
 
+        if dry_run {
+            println!("🔍 Dry run — generated event payload:\n");
+            println!("{}", serde_json::to_string_pretty(&event_payload)?);
+            return Ok(());
+        }
+
         println!(
             "⚡ Triggering {} → {} with {} message(s)",
             source, lambda.function_name, batch
@@ -1325,6 +1338,36 @@ async fn cmd_trigger(
     }
 
     // Standard path: use event source mapping
+    if dry_run {
+        // Build event for display without invoking
+        let event_payload = match source_type.as_str() {
+            "sqs" => {
+                let queue = config
+                    .sqs_queues
+                    .iter()
+                    .find(|q| q.resource_name == source || q.name == source);
+                let (name, fifo) = queue
+                    .map(|q| (q.name.clone(), q.fifo_queue))
+                    .unwrap_or((source.clone(), false));
+                trigger::build_sqs_event(&name, &messages, fifo)
+            }
+            "sns" => {
+                let topic = config
+                    .sns_topics
+                    .iter()
+                    .find(|t| t.resource_name == source || t.name == source);
+                let name = topic.map(|t| t.name.clone()).unwrap_or(source.clone());
+                trigger::build_sns_event(&name, &messages)
+            }
+            _ => anyhow::bail!(
+                "Unsupported trigger type '{}'. Use 'sqs' or 'sns'.",
+                source_type
+            ),
+        };
+        println!("🔍 Dry run — generated event payload:\n");
+        println!("{}", serde_json::to_string_pretty(&event_payload)?);
+        return Ok(());
+    }
     trigger::execute_trigger(&config, &source_type, &source, messages, &dir).await
 }
 
