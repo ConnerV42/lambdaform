@@ -54,11 +54,31 @@ struct HistoryRecorderInner {
 }
 
 impl HistoryRecorder {
-    /// Create a new recorder, writing to `.lambdaform/history.jsonl` in the given dir
+    /// Maximum number of history entries to keep (rotate on startup)
+    const MAX_ENTRIES: usize = 1000;
+
+    /// Create a new recorder, writing to `.lambdaform/history.jsonl` in the given dir.
+    /// Rotates the history file on startup if it exceeds MAX_ENTRIES.
     pub fn new(project_dir: &Path) -> std::io::Result<Self> {
         let dir = project_dir.join(".lambdaform");
         std::fs::create_dir_all(&dir)?;
         let file_path = dir.join("history.jsonl");
+
+        // Rotate on startup: keep only the last MAX_ENTRIES
+        if file_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+                if lines.len() > Self::MAX_ENTRIES {
+                    let kept = &lines[lines.len() - Self::MAX_ENTRIES..];
+                    let _ = std::fs::write(&file_path, kept.join("\n") + "\n");
+                    tracing::info!(
+                        "Rotated history: {} → {} entries",
+                        lines.len(),
+                        Self::MAX_ENTRIES
+                    );
+                }
+            }
+        }
 
         Ok(Self {
             file_path,
