@@ -858,6 +858,32 @@ fn parse_tf_file(
                 let resource_type = &labels[0];
                 let resource_name = &labels[1];
 
+                // Warn about count/for_each meta-arguments (not yet supported)
+                for attr in block.body.attributes() {
+                    let key = attr.key.to_string();
+                    if key == "count" {
+                        let line = find_resource_line(&content, resource_type, resource_name);
+                        let loc = line
+                            .map(|l| format!("{}:{}", path.display(), l))
+                            .unwrap_or_else(|| path.display().to_string());
+                        tracing::warn!(
+                            "⚠️  resource \"{}.{}\" uses count — Lambdaform will treat it as a single instance. \
+                             References like {}.{}[0] may not resolve correctly. ({})",
+                            resource_type, resource_name, resource_type, resource_name, loc
+                        );
+                    } else if key == "for_each" {
+                        let line = find_resource_line(&content, resource_type, resource_name);
+                        let loc = line
+                            .map(|l| format!("{}:{}", path.display(), l))
+                            .unwrap_or_else(|| path.display().to_string());
+                        tracing::warn!(
+                            "⚠️  resource \"{}.{}\" uses for_each — Lambdaform will treat it as a single instance. \
+                             Keyed references like {}.{}[\"key\"] may not resolve correctly. ({})",
+                            resource_type, resource_name, resource_type, resource_name, loc
+                        );
+                    }
+                }
+
                 match resource_type.as_str() {
                     "aws_lambda_function" => {
                         let line = find_resource_line(&content, resource_type, resource_name);
@@ -3015,6 +3041,42 @@ resource "aws_lambda_function" "worker" {
         assert_eq!(
             func.function_name,
             "arn:aws:lambda:us-west-2:123456789-worker"
+        );
+    }
+
+    #[test]
+    fn test_count_for_each_warns_but_still_parses() {
+        // Resources with count/for_each should still parse as single instances
+        let dir = TempDir::new().unwrap();
+        let tf = dir.path().join("main.tf");
+        std::fs::write(
+            &tf,
+            r#"
+resource "aws_lambda_function" "workers" {
+  count         = 3
+  function_name = "worker-${count.index}"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "lambda.zip"
+}
+
+resource "aws_lambda_function" "per_region" {
+  for_each      = toset(["us-east-1", "us-west-2"])
+  function_name = "api-${each.key}"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "lambda.zip"
+}
+"#,
+        )
+        .unwrap();
+
+        // Should parse without error, treating each as a single instance
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(
+            config.functions.len(),
+            2,
+            "Both functions should parse as single instances"
         );
     }
 }
