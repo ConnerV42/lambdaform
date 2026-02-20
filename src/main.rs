@@ -2,7 +2,7 @@
 //!
 //! The only local Lambda tool that reads your Terraform.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -238,6 +238,13 @@ enum Commands {
         json: bool,
     },
 
+    /// Generate shell completion scripts (bash, zsh, fish, powershell)
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
     /// Visualize infrastructure relationships (Lambda→APIGW→DynamoDB→SQS→SNS)
     Graph {
         /// Directory containing Terraform files
@@ -362,6 +369,15 @@ fn main() -> anyhow::Result<()> {
             format,
             var_files,
         } => cmd_graph(dir, format, var_files),
+        Commands::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "lambdaform",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
         Commands::Init { dir, yes } => cmd_init(dir, yes),
         Commands::Replay {
             dir,

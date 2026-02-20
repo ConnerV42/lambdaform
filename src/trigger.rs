@@ -20,7 +20,7 @@ pub fn build_sqs_event(queue_name: &str, messages: &[String], fifo: bool) -> Val
     let records: Vec<Value> = messages.iter().map(|msg| {
         let message_id = Uuid::new_v4().to_string();
         let receipt_handle = format!("AQEBwJnK{}", Uuid::new_v4().to_string().replace('-', ""));
-        let md5 = format!("{:x}", md5_hash(msg));
+        let md5 = md5_hash(msg);
 
         let mut record = json!({
             "messageId": message_id,
@@ -271,13 +271,12 @@ fn chrono_timestamp() -> String {
     )
 }
 
-/// Simple string hash for md5OfBody (not cryptographic, just for simulation)
-fn md5_hash(s: &str) -> u128 {
-    let mut h: u128 = 0;
-    for b in s.bytes() {
-        h = h.wrapping_mul(31).wrapping_add(b as u128);
-    }
-    h
+/// Compute MD5 hash of a string (matches AWS md5OfBody format)
+fn md5_hash(s: &str) -> String {
+    use md5::{Digest, Md5};
+    let mut hasher = Md5::new();
+    hasher.update(s.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]

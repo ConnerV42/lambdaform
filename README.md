@@ -129,6 +129,15 @@ lambdaform trigger sqs my_queue '{"key":"value"}'
 lambdaform trigger sns my_topic '{"key":"value"}'
 lambdaform trigger sqs my_queue '{"key":"value"}' --batch 5
 lambdaform trigger sqs my_queue '{"key":"value"}' --function my_handler
+
+# Terminal UI (requires compile-time feature)
+cargo install lambdaform --features tui
+lambdaform start --tui                     # live dashboard with request log
+
+# Shell completions
+lambdaform completions bash > ~/.bash_completion.d/lambdaform
+lambdaform completions zsh > ~/.zfunc/_lambdaform
+lambdaform completions fish > ~/.config/fish/completions/lambdaform.fish
 ```
 
 ## Example
