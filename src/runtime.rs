@@ -863,11 +863,10 @@ except Exception as e:
 
         if needs_build {
             tracing::info!("Building Go Lambda in {}", source_dir.display());
+            // Build for the host platform — the binary runs locally, not in Lambda
             let output = Command::new("go")
                 .args(["build", "-o", "bootstrap", "."])
                 .current_dir(&source_dir)
-                .env("GOOS", "linux")
-                .env("GOARCH", std::env::consts::ARCH)
                 .output()
                 .await
                 .context("Failed to run `go build`. Is Go installed?")?;
