@@ -263,6 +263,7 @@ pub fn build_app(
     Router::new()
         .route("/*path", any(handle_request))
         .route("/", any(handle_request))
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB, matching API Gateway REST limit
         .layer(cors)
         .with_state(state)
 }
@@ -300,6 +301,7 @@ pub async fn start_server(
     let app = Router::new()
         .route("/*path", any(handle_request))
         .route("/", any(handle_request))
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(cors)
         .with_state(state);
 
@@ -361,6 +363,7 @@ pub async fn start_multi_gateway(
             .route("/*path", any(handle_request))
             .route("/", any(handle_request))
             .layer(cors)
+            .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
             .with_state(state);
 
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], binding.port));
@@ -434,6 +437,7 @@ pub async fn start_server_with_watch(
         .route("/*path", any(handle_request))
         .route("/", any(handle_request))
         .layer(cors)
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
