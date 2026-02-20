@@ -56,18 +56,22 @@ impl VariableResolver {
             }
         }
 
-        // Pass 2: Load terraform.tfvars (auto-loaded by Terraform)
+        // Pass 2: Load terraform.tfvars and terraform.tfvars.json (auto-loaded by Terraform)
         let tfvars_path = dir.join("terraform.tfvars");
         if tfvars_path.exists() {
             resolver.load_tfvars(&tfvars_path)?;
         }
+        let tfvars_json_path = dir.join("terraform.tfvars.json");
+        if tfvars_json_path.exists() {
+            resolver.load_tfvars(&tfvars_json_path)?;
+        }
 
-        // Pass 3: Load *.auto.tfvars (alphabetical order)
+        // Pass 3: Load *.auto.tfvars and *.auto.tfvars.json (alphabetical order)
         let mut auto_tfvars: Vec<_> = Vec::new();
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.ends_with(".auto.tfvars") {
+                if name.ends_with(".auto.tfvars") || name.ends_with(".auto.tfvars.json") {
                     auto_tfvars.push(path);
                 }
             }
@@ -133,17 +137,40 @@ impl VariableResolver {
         }
     }
 
-    /// Load variable values from a .tfvars file.
+    /// Load variable values from a .tfvars or .tfvars.json file.
     fn load_tfvars(&mut self, path: &Path) -> Result<()> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let body: hcl::Body = hcl::from_str(&content)
-            .with_context(|| format!("Failed to parse {}", path.display()))?;
 
-        for attr in body.attributes() {
-            let key = attr.key.to_string();
-            if let Some(val) = expr_to_string(&attr.expr) {
-                self.variables.insert(key, val);
+        let is_json = path
+            .to_str()
+            .map(|s| s.ends_with(".tfvars.json"))
+            .unwrap_or(false);
+
+        if is_json {
+            // Parse as JSON: expect a flat object of string values
+            let obj: serde_json::Value = serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse JSON {}", path.display()))?;
+            if let serde_json::Value::Object(map) = obj {
+                for (key, val) in map {
+                    let str_val = match &val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        _ => serde_json::to_string(&val).unwrap_or_default(),
+                    };
+                    self.variables.insert(key, str_val);
+                }
+            }
+        } else {
+            let body: hcl::Body = hcl::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", path.display()))?;
+
+            for attr in body.attributes() {
+                let key = attr.key.to_string();
+                if let Some(val) = expr_to_string(&attr.expr) {
+                    self.variables.insert(key, val);
+                }
             }
         }
 
