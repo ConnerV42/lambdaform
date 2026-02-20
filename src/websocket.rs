@@ -144,10 +144,17 @@ pub async fn start_websocket_server(
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("🔌 WebSocket server listening on ws://{}", addr);
 
-    // Also start a small HTTP server for @connections API on port+1
+    // Start a small HTTP server for @connections management API on port+1
     let connections_state = state.clone();
-    let connections_port = port + 1000; // Use port+1000 for management API
-    tokio::spawn(start_connections_api(connections_state, connections_port));
+    if let Some(connections_port) = port.checked_add(1) {
+        tokio::spawn(start_connections_api(connections_state, connections_port));
+    } else {
+        tracing::warn!(
+            "⚠️ Cannot start @connections API: port {} + 1 overflows u16. \
+             Use a lower WebSocket port to enable the management API.",
+            port
+        );
+    }
 
     loop {
         tokio::select! {
@@ -528,9 +535,19 @@ async fn start_connections_api(state: Arc<WsState>, port: u16) {
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
-        tracing::info!("📡 @connections API on http://localhost:{}", port);
-        let _ = axum::serve(listener, app).await;
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            tracing::info!("📡 @connections API on http://localhost:{}", port);
+            let _ = axum::serve(listener, app).await;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "⚠️ Failed to bind @connections API on port {}: {}. \
+                 WebSocket server will work but @connections POST API won't be available.",
+                port,
+                e
+            );
+        }
     }
 }
 
