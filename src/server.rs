@@ -516,6 +516,40 @@ fn format_bytes(bytes: usize) -> String {
 }
 
 /// Format current time as ISO 8601 (UTC)
+/// Returns true if the content type represents binary data that API Gateway would base64-encode.
+/// Matches AWS API Gateway behavior: text/*, application/json, application/xml, and
+/// application/javascript are treated as text; everything else is binary.
+fn is_binary_content_type(content_type: &str) -> bool {
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if ct.is_empty() {
+        return false;
+    }
+    // Text types are not binary
+    if ct.starts_with("text/") {
+        return false;
+    }
+    // Common text-like application types
+    let text_app_types = [
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "application/x-www-form-urlencoded",
+        "application/graphql",
+        "application/yaml",
+        "application/x-yaml",
+    ];
+    if text_app_types.contains(&ct.as_str()) {
+        return false;
+    }
+    // Everything else (application/octet-stream, image/*, audio/*, multipart/*, etc.) is binary
+    true
+}
+
 fn format_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -670,10 +704,23 @@ async fn handle_request(
         Some(query.clone())
     };
 
-    let body_str = if body.is_empty() {
-        None
+    // Detect binary content and base64-encode if needed (matches real API Gateway behavior)
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_binary = !body.is_empty() && is_binary_content_type(content_type);
+
+    let (body_str, body_is_base64) = if body.is_empty() {
+        (None, false)
+    } else if is_binary {
+        use base64::Engine;
+        (
+            Some(base64::engine::general_purpose::STANDARD.encode(&body)),
+            true,
+        )
     } else {
-        Some(String::from_utf8_lossy(&body).to_string())
+        (Some(String::from_utf8_lossy(&body).to_string()), false)
     };
 
     // Build event based on API type (v1 REST vs v2 HTTP)
@@ -706,7 +753,7 @@ async fn handle_request(
                 stage_variables: None,
                 headers: Some(headers_map),
                 body: body_str,
-                is_base64_encoded: false,
+                is_base64_encoded: body_is_base64,
                 request_context: crate::runtime::RequestContextV2 {
                     stage: "$default".to_string(),
                     request_id: request_id.clone(),
@@ -775,7 +822,7 @@ async fn handle_request(
                 headers: Some(headers_map),
                 multi_value_headers,
                 body: body_str,
-                is_base64_encoded: false,
+                is_base64_encoded: body_is_base64,
                 request_context,
             };
             serde_json::to_value(event_v1).unwrap_or_default()
@@ -1126,6 +1173,28 @@ mod tests {
             max_age: None,
         };
         let _layer = build_cors_layer(Some(&config));
+    }
+
+    #[test]
+    fn test_is_binary_content_type() {
+        // Text types → not binary
+        assert!(!is_binary_content_type("text/plain"));
+        assert!(!is_binary_content_type("text/html; charset=utf-8"));
+        assert!(!is_binary_content_type("application/json"));
+        assert!(!is_binary_content_type("application/xml"));
+        assert!(!is_binary_content_type("application/x-www-form-urlencoded"));
+        assert!(!is_binary_content_type("application/javascript"));
+        assert!(!is_binary_content_type("")); // empty → not binary
+
+        // Binary types → binary
+        assert!(is_binary_content_type("application/octet-stream"));
+        assert!(is_binary_content_type("image/png"));
+        assert!(is_binary_content_type("image/jpeg"));
+        assert!(is_binary_content_type("audio/mpeg"));
+        assert!(is_binary_content_type("multipart/form-data; boundary=abc"));
+        assert!(is_binary_content_type("application/pdf"));
+        assert!(is_binary_content_type("application/zip"));
+        assert!(is_binary_content_type("application/protobuf"));
     }
 }
 
