@@ -880,7 +880,8 @@ fn cmd_invoke(
             },
         };
 
-        let executor = runtime::FunctionExecutor::new(lambda.clone(), dir);
+        let fn_dir = lambda.resolve_source_dir_with_archives(&dir, &tf_config.archive_files);
+        let executor = runtime::FunctionExecutor::new(lambda.clone(), fn_dir);
         match executor.invoke(lambda_event).await {
             Ok(response) => {
                 // Pretty-print the response body
@@ -1252,7 +1253,8 @@ async fn cmd_trigger(
             source, lambda.function_name, batch
         );
 
-        let executor = runtime::FunctionExecutor::new(lambda.clone(), dir);
+        let fn_dir = lambda.resolve_source_dir_with_archives(&dir, &config.archive_files);
+        let executor = runtime::FunctionExecutor::new(lambda.clone(), fn_dir);
         match executor.invoke_raw_event(event_payload).await {
             Ok(result) => {
                 println!("✅ Success");

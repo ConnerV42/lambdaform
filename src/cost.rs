@@ -451,6 +451,7 @@ mod tests {
             handler: "index.handler".to_string(),
             runtime: Runtime::Nodejs20,
             source_path: None,
+            filename_ref: None,
             environment: HashMap::new(),
             timeout: 30,
             memory_size: memory_mb,

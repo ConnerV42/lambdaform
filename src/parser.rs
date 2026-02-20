@@ -945,8 +945,23 @@ fn parse_tf_file(
                     _ => {}
                 }
             }
+        } else if identifier == "data" {
+            let labels: Vec<String> = block.labels.iter().map(label_to_string).collect();
+            if labels.len() >= 2 {
+                let data_type = &labels[0];
+                let data_name = &labels[1];
+
+                if data_type == "archive_file" {
+                    if let Some(af) = parse_archive_file(data_name, block) {
+                        config.archive_files.push(af);
+                    }
+                }
+            }
         }
     }
+
+    // Resolve archive_file references in Lambda filename attributes
+    resolve_archive_file_refs(config);
 
     // Resolve cross-resource references in Lambda environment variables
     // (e.g., aws_dynamodb_table.meetings.name → resolved table name)
@@ -976,6 +991,54 @@ fn parse_tf_file(
 /// Builds a lookup table from parsed resources, then replaces unresolved traversal
 /// references in Lambda env vars (e.g., `aws_dynamodb_table.meetings.name` → table name,
 /// `aws_sqs_queue.ingest_queue.id` → queue name).
+/// Resolve filename traversal references (e.g., data.archive_file.X.output_path)
+/// to actual source directories using parsed archive_file data sources.
+fn resolve_archive_file_refs(config: &mut LambdaformConfig) {
+    let archive_files = config.archive_files.clone();
+
+    for func in &mut config.functions {
+        if func.source_path.is_some() {
+            continue;
+        }
+        if let Some(ref fref) = func.filename_ref {
+            // Parse "data.archive_file.NAME.output_path" pattern
+            let parts: Vec<&str> = fref.split('.').collect();
+            if parts.len() >= 3 && parts[0] == "data" && parts[1] == "archive_file" {
+                let archive_name = parts[2];
+                if let Some(archive) = archive_files
+                    .iter()
+                    .find(|a| a.resource_name == archive_name)
+                {
+                    // Use source_dir from the archive_file
+                    if let Some(ref sd) = archive.source_dir {
+                        tracing::info!(
+                            "Function '{}': resolved filename ref '{}' to source_dir '{}'",
+                            func.function_name,
+                            fref,
+                            sd.display(),
+                        );
+                        func.source_path = Some(sd.clone());
+                    } else if let Some(ref sf) = archive.source_file {
+                        // Use parent of source_file
+                        if let Some(parent) = sf.parent() {
+                            tracing::info!(
+                                "Function '{}': resolved filename ref '{}' to source_file parent '{}'",
+                                func.function_name,
+                                fref,
+                                parent.display(),
+                            );
+                            func.source_path = Some(parent.to_path_buf());
+                        }
+                    } else if let Some(ref op) = archive.output_path {
+                        // Last resort: use the output_path (zip) — resolve_source_dir will handle it
+                        func.source_path = Some(op.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn resolve_cross_resource_env_vars(config: &mut LambdaformConfig) {
     // Build resource attribute lookup: "aws_type.resource_name.attr" → value
     let mut resource_attrs: HashMap<String, String> = HashMap::new();
@@ -1510,6 +1573,14 @@ fn parse_lambda_function(
         })
         .map(std::path::PathBuf::from);
 
+    // If source_path is None, filename might be a traversal (e.g., data.archive_file.X.output_path)
+    // Store the traversal ref so we can resolve it against archive_files later
+    let filename_ref = if source_path.is_none() {
+        get_traversal_attr(body, "filename")
+    } else {
+        None
+    };
+
     // Extract layer references (e.g., [aws_lambda_layer_version.utils.arn])
     let layers = get_list_traversal_attrs(body, "layers")
         .into_iter()
@@ -1522,6 +1593,7 @@ fn parse_lambda_function(
         handler,
         runtime: Runtime::from_str(&runtime_str),
         source_path,
+        filename_ref,
         environment,
         timeout,
         memory_size,
@@ -1550,6 +1622,27 @@ fn parse_lambda_layer(
         source_path,
         compatible_runtimes,
     }))
+}
+
+/// Parse data.archive_file block to extract source_dir/source_file/output_path
+fn parse_archive_file(name: &str, block: &hcl::Block) -> Option<crate::config::ArchiveFileConfig> {
+    let body = &block.body;
+
+    let source_dir = get_string_attr(body, "source_dir").map(std::path::PathBuf::from);
+    let source_file = get_string_attr(body, "source_file").map(std::path::PathBuf::from);
+    let output_path = get_string_attr(body, "output_path").map(std::path::PathBuf::from);
+
+    // Only useful if at least output_path is set
+    if output_path.is_none() && source_dir.is_none() && source_file.is_none() {
+        return None;
+    }
+
+    Some(crate::config::ArchiveFileConfig {
+        resource_name: name.to_string(),
+        source_dir,
+        source_file,
+        output_path,
+    })
 }
 
 /// Parse aws_sfn_state_machine resource

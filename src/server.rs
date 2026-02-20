@@ -764,6 +764,7 @@ async fn handle_request(
     let function = matched.function.clone();
     let authorizer_function = matched.authorizer_function.cloned();
     let layers_config = inner.config.layers.clone();
+    let archive_files = inner.config.archive_files.clone();
     drop(inner);
 
     // Execute authorizer if present
@@ -793,7 +794,9 @@ async fn handle_request(
             },
         };
 
-        let auth_executor = FunctionExecutor::new(auth_fn, state.source_dir.clone())
+        let auth_source_dir =
+            auth_fn.resolve_source_dir_with_archives(&state.source_dir, &archive_files);
+        let auth_executor = FunctionExecutor::new(auth_fn, auth_source_dir)
             .with_debug(state.debug.clone())
             .with_pool(Some(state.pool.clone()));
         match auth_executor.invoke_authorizer(auth_event).await {
@@ -827,8 +830,10 @@ async fn handle_request(
     // Resolve layer paths for this function
     let layer_paths = resolve_layer_paths(&function, &layers_config, &state.source_dir);
 
-    // Execute function
-    let executor = FunctionExecutor::new(function.clone(), state.source_dir.clone())
+    // Execute function — resolve source directory per-function
+    let fn_source_dir =
+        function.resolve_source_dir_with_archives(&state.source_dir, &archive_files);
+    let executor = FunctionExecutor::new(function.clone(), fn_source_dir)
         .with_debug(state.debug.clone())
         .with_pool(Some(state.pool.clone()))
         .with_layer_paths(layer_paths);

@@ -447,9 +447,12 @@ async fn invoke_route_handler(
     let config = state.config.read().await;
     let layer_paths =
         crate::server::resolve_layer_paths(&function, &config.layers, &state.source_dir);
+    let archive_files = config.archive_files.clone();
     drop(config);
 
-    let executor = FunctionExecutor::new(function.clone(), state.source_dir.clone())
+    let fn_source_dir =
+        function.resolve_source_dir_with_archives(&state.source_dir, &archive_files);
+    let executor = FunctionExecutor::new(function.clone(), fn_source_dir)
         .with_debug(state.debug.clone())
         .with_pool(Some(state.pool.clone()))
         .with_layer_paths(layer_paths);

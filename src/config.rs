@@ -38,6 +38,26 @@ pub struct LambdaformConfig {
     /// Event source mappings (SQS/SNS/DynamoDB → Lambda)
     #[serde(default)]
     pub event_source_mappings: Vec<EventSourceMappingConfig>,
+
+    /// Archive file data sources (for source_path resolution)
+    #[serde(default)]
+    pub archive_files: Vec<ArchiveFileConfig>,
+}
+
+/// Parsed data.archive_file block — used to resolve zip-based source paths
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveFileConfig {
+    /// Resource name (data.archive_file.NAME)
+    pub resource_name: String,
+
+    /// source_dir attribute (directory to zip)
+    pub source_dir: Option<PathBuf>,
+
+    /// source_file attribute (single file to zip)
+    pub source_file: Option<PathBuf>,
+
+    /// output_path attribute (the zip file path)
+    pub output_path: Option<PathBuf>,
 }
 
 /// DynamoDB table configuration (parsed for integration hints)
@@ -193,6 +213,11 @@ pub struct LambdaConfig {
     /// Path to source code
     pub source_path: Option<PathBuf>,
 
+    /// Unresolved filename traversal reference (e.g., "data.archive_file.X.output_path")
+    /// Used for post-processing resolution against archive_file data sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename_ref: Option<String>,
+
     /// Environment variables
     #[serde(default)]
     pub environment: HashMap<String, String>,
@@ -225,6 +250,226 @@ pub struct LayerConfig {
     /// Compatible runtimes
     #[serde(default)]
     pub compatible_runtimes: Vec<String>,
+}
+
+impl LambdaConfig {
+    /// Resolve the effective source directory for this function.
+    ///
+    /// Priority:
+    /// 1. `source_path` if it's an existing directory
+    /// 2. If `source_path` ends in `.zip`, check archive_file data sources for source_dir
+    /// 3. If `source_path` ends in `.zip`, try the directory without the extension
+    /// 4. If `source_path` is a file, use its parent directory
+    /// 5. Scan for common source directories (src/, lambda/, functions/, lib/)
+    /// 6. Fall back to the project source directory with a warning
+    pub fn resolve_source_dir(&self, project_dir: &std::path::Path) -> PathBuf {
+        self.resolve_source_dir_with_archives(project_dir, &[])
+    }
+
+    /// Resolve source directory with archive_file data sources for zip resolution.
+    pub fn resolve_source_dir_with_archives(
+        &self,
+        project_dir: &std::path::Path,
+        archive_files: &[ArchiveFileConfig],
+    ) -> PathBuf {
+        if let Some(ref sp) = self.source_path {
+            // Resolve relative to project dir
+            let resolved = if sp.is_relative() {
+                project_dir.join(sp)
+            } else {
+                sp.clone()
+            };
+
+            if resolved.is_dir() {
+                return resolved;
+            }
+
+            // If it's a .zip, try multiple strategies
+            if resolved.extension().and_then(|e| e.to_str()) == Some("zip") {
+                // Strategy 1: Check archive_file data sources
+                if let Some(dir) = self.resolve_from_archive_files(sp, archive_files, project_dir) {
+                    return dir;
+                }
+
+                // Strategy 2: Try directory with same name as zip (e.g., deploy.zip → deploy/)
+                let dir_path = resolved.with_extension("");
+                if dir_path.is_dir() {
+                    tracing::debug!(
+                        "Function '{}': source_path '{}' is a zip, using directory '{}'",
+                        self.function_name,
+                        resolved.display(),
+                        dir_path.display()
+                    );
+                    return dir_path;
+                }
+
+                // Strategy 3: Try parent directory (zip might be in a subdirectory)
+                if let Some(parent) = resolved.parent() {
+                    if parent.is_dir() && parent != project_dir {
+                        tracing::debug!(
+                            "Function '{}': using parent of zip path '{}'",
+                            self.function_name,
+                            parent.display()
+                        );
+                        return parent.to_path_buf();
+                    }
+                }
+
+                // Strategy 4: Scan for handler file in common source directories
+                if let Some(dir) = self.find_handler_in_common_dirs(project_dir) {
+                    tracing::info!(
+                        "Function '{}': found handler in '{}' (source_path '{}' is a zip)",
+                        self.function_name,
+                        dir.display(),
+                        resolved.display()
+                    );
+                    return dir;
+                }
+
+                tracing::warn!(
+                    "Function '{}': source_path '{}' is a zip archive. \
+                     Lambdaform needs source code, not a zip. \
+                     Add this to your lambdaform.yaml to fix:\n\n  \
+                     functions:\n    {}:\n      source_path: ./path/to/source\n\n  \
+                     Or set source_path in Terraform instead of filename pointing to a zip.",
+                    self.function_name,
+                    resolved.display(),
+                    self.resource_name,
+                );
+            } else if resolved.is_file() {
+                // If it's a file, use parent directory
+                if let Some(parent) = resolved.parent() {
+                    return parent.to_path_buf();
+                }
+            }
+        }
+
+        // source_path is None or didn't resolve — try scanning common dirs for handler
+        if let Some(dir) = self.find_handler_in_common_dirs(project_dir) {
+            tracing::info!(
+                "Function '{}': no source_path set, found handler in '{}'",
+                self.function_name,
+                dir.display()
+            );
+            return dir;
+        }
+
+        // Final fallback: warn with actionable guidance
+        if self.source_path.is_none() {
+            tracing::warn!(
+                "Function '{}': no source_path or filename attribute found in Terraform. \
+                 Lambdaform will look for handler '{}' in the project root. \
+                 If your source is elsewhere, add this to lambdaform.yaml:\n\n  \
+                 functions:\n    {}:\n      source_path: ./path/to/source\n",
+                self.function_name,
+                self.handler_filename(),
+                self.resource_name,
+            );
+        }
+
+        project_dir.to_path_buf()
+    }
+
+    /// Try to resolve source_path from archive_file data sources.
+    /// Matches when an archive_file's output_path matches the function's filename.
+    fn resolve_from_archive_files(
+        &self,
+        source_path: &std::path::Path,
+        archive_files: &[ArchiveFileConfig],
+        project_dir: &std::path::Path,
+    ) -> Option<PathBuf> {
+        for archive in archive_files {
+            // Match by output_path
+            let matches = archive.output_path.as_ref().is_some_and(|op| {
+                // Compare normalized paths
+                let op_normalized = if op.is_relative() {
+                    project_dir.join(op)
+                } else {
+                    op.clone()
+                };
+                let sp_normalized = if source_path.is_relative() {
+                    project_dir.join(source_path)
+                } else {
+                    source_path.to_path_buf()
+                };
+                op_normalized == sp_normalized || op.file_name() == source_path.file_name()
+            });
+
+            if matches {
+                // Prefer source_dir
+                if let Some(ref sd) = archive.source_dir {
+                    let resolved = if sd.is_relative() {
+                        project_dir.join(sd)
+                    } else {
+                        sd.clone()
+                    };
+                    if resolved.is_dir() {
+                        tracing::info!(
+                            "Function '{}': resolved zip '{}' to source_dir '{}' via data.archive_file.{}",
+                            self.function_name,
+                            source_path.display(),
+                            resolved.display(),
+                            archive.resource_name,
+                        );
+                        return Some(resolved);
+                    }
+                }
+
+                // Fall back to source_file's parent
+                if let Some(ref sf) = archive.source_file {
+                    let resolved = if sf.is_relative() {
+                        project_dir.join(sf)
+                    } else {
+                        sf.clone()
+                    };
+                    if let Some(parent) = resolved.parent() {
+                        if parent.is_dir() {
+                            tracing::info!(
+                                "Function '{}': resolved zip '{}' to source_file parent '{}' via data.archive_file.{}",
+                                self.function_name,
+                                source_path.display(),
+                                parent.display(),
+                                archive.resource_name,
+                            );
+                            return Some(parent.to_path_buf());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Scan common source directories for the handler file.
+    fn find_handler_in_common_dirs(&self, project_dir: &std::path::Path) -> Option<PathBuf> {
+        let handler_file = self.handler_filename();
+        let common_dirs = ["src", "lambda", "functions", "lib", "app", "handler"];
+
+        for dir_name in &common_dirs {
+            let candidate = project_dir.join(dir_name);
+            if candidate.is_dir() && candidate.join(&handler_file).is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Get the expected handler filename based on runtime and handler string.
+    fn handler_filename(&self) -> String {
+        let module = self.handler.split('.').next().unwrap_or("index");
+        match self.runtime {
+            Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Nodejs22 => {
+                format!("{}.js", module)
+            }
+            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 | Runtime::Python313 => {
+                format!("{}.py", module)
+            }
+            Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
+                "bootstrap".to_string()
+            }
+            _ => format!("{}.js", module), // default assumption
+        }
+    }
 }
 
 fn default_timeout() -> u32 {
@@ -541,5 +786,55 @@ mod tests {
     fn test_lambda_config_defaults() {
         assert_eq!(default_timeout(), 3);
         assert_eq!(default_memory(), 128);
+    }
+
+    #[test]
+    fn test_resolve_source_dir_no_source_path_scans_common_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("index.js"), "exports.handler = () => {}").unwrap();
+
+        let config = LambdaConfig {
+            resource_name: "my_func".to_string(),
+            function_name: "my_func".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+        };
+
+        let resolved = config.resolve_source_dir(tmp.path());
+        assert_eq!(resolved, src_dir);
+    }
+
+    #[test]
+    fn test_resolve_source_dir_zip_finds_matching_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deploy_dir = tmp.path().join("deploy");
+        std::fs::create_dir_all(&deploy_dir).unwrap();
+        std::fs::write(deploy_dir.join("index.js"), "exports.handler = () => {}").unwrap();
+        // Create a fake zip file so the path "exists" as a file check won't pass
+        // (we just need the .zip extension to trigger the strategy)
+
+        let config = LambdaConfig {
+            resource_name: "my_func".to_string(),
+            function_name: "my_func".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: Some(std::path::PathBuf::from("deploy.zip")),
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+        };
+
+        let resolved = config.resolve_source_dir(tmp.path());
+        assert_eq!(resolved, deploy_dir);
     }
 }

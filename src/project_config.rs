@@ -306,6 +306,7 @@ environment:
                 handler: "index.handler".into(),
                 runtime: crate::config::Runtime::Nodejs20,
                 source_path: None,
+                filename_ref: None,
                 environment: HashMap::new(),
                 timeout: 3,
                 memory_size: 128,
@@ -318,6 +319,7 @@ environment:
             sqs_queues: vec![],
             sns_topics: vec![],
             event_source_mappings: vec![],
+            archive_files: vec![],
         };
         proj.apply(&mut config);
         assert_eq!(

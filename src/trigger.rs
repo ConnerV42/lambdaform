@@ -216,7 +216,8 @@ pub async fn execute_trigger(
         messages.len()
     );
 
-    let executor = FunctionExecutor::new(lambda.clone(), source_dir.to_path_buf());
+    let fn_source_dir = lambda.resolve_source_dir_with_archives(source_dir, &config.archive_files);
+    let executor = FunctionExecutor::new(lambda.clone(), fn_source_dir);
     match executor.invoke_raw_event(event_payload).await {
         Ok(result) => {
             println!("✅ Invocation successful");

@@ -511,6 +511,7 @@ mod tests {
                     handler: "index.handler".to_string(),
                     runtime: Runtime::Nodejs20,
                     source_path: Some("src/api".into()),
+                    filename_ref: None,
                     environment: {
                         let mut m = HashMap::new();
                         m.insert("TABLE_NAME".to_string(), "users-table".to_string());
@@ -526,6 +527,7 @@ mod tests {
                     handler: "worker.handle".to_string(),
                     runtime: Runtime::Python312,
                     source_path: Some("src/worker".into()),
+                    filename_ref: None,
                     environment: HashMap::new(),
                     timeout: 900,
                     memory_size: 512,
@@ -584,6 +586,7 @@ mod tests {
                 compatible_runtimes: vec!["nodejs20.x".to_string()],
             }],
             state_machines: vec![],
+            archive_files: vec![],
         }
     }
 
