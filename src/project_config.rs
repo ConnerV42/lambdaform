@@ -320,6 +320,7 @@ environment:
             sns_topics: vec![],
             event_source_mappings: vec![],
             archive_files: vec![],
+            detected_cors: None,
         };
         proj.apply(&mut config);
         assert_eq!(

@@ -476,6 +476,38 @@ async fn cmd_start(
         }
     }
 
+    // Validate handler files exist at startup
+    for f in &config.functions {
+        if !f.handler.contains('.') {
+            continue;
+        }
+        let parts: Vec<&str> = f.handler.rsplitn(2, '.').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let file_part = parts[1]; // module path (e.g., "index" or "src/index")
+        let ext = if f.runtime.is_nodejs() {
+            Some("js")
+        } else if f.runtime.is_python() {
+            Some("py")
+        } else {
+            None
+        };
+        if let Some(ext) = ext {
+            let source_dir = f.resolve_source_dir_with_archives(&dir, &config.archive_files);
+            let handler_file = format!("{}.{}", file_part, ext);
+            let full_path = source_dir.join(&handler_file);
+            if !full_path.exists() {
+                println!(
+                    "   ⚠️  Function '{}': handler file '{}' not found in {}",
+                    f.function_name,
+                    handler_file,
+                    source_dir.display()
+                );
+            }
+        }
+    }
+
     // Warn about Docker requirement for Java runtimes
     if has_java {
         let docker_ok = Docker::connect_with_local_defaults().is_ok();
@@ -560,10 +592,19 @@ async fn cmd_start(
         println!("\n🔥 Starting server at http://localhost:{}\n", port);
     }
 
-    // CORS config
-    let cors_config = project_config.as_ref().and_then(|pc| pc.cors.clone());
-    if cors_config.is_some() {
+    // CORS config: explicit lambdaform.yaml > auto-detected from Terraform MOCK > permissive defaults
+    let cors_config = project_config
+        .as_ref()
+        .and_then(|pc| pc.cors.clone())
+        .or_else(|| config.detected_cors.clone());
+    if project_config
+        .as_ref()
+        .and_then(|pc| pc.cors.as_ref())
+        .is_some()
+    {
         println!("🔓 CORS enabled via lambdaform.yaml");
+    } else if config.detected_cors.is_some() {
+        println!("🔓 CORS auto-configured from Terraform MOCK integration");
     } else {
         println!("🔓 CORS enabled (permissive defaults — allow all origins)");
     }

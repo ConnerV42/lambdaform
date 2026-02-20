@@ -42,6 +42,11 @@ pub struct LambdaformConfig {
     /// Archive file data sources (for source_path resolution)
     #[serde(default)]
     pub archive_files: Vec<ArchiveFileConfig>,
+
+    /// CORS config auto-detected from MOCK integrations in Terraform
+    /// Used as fallback when no explicit CORS config in lambdaform.yaml
+    #[serde(skip)]
+    pub detected_cors: Option<crate::project_config::CorsConfig>,
 }
 
 /// Parsed data.archive_file block — used to resolve zip-based source paths

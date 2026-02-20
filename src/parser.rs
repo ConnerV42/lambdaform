@@ -807,6 +807,16 @@ struct ApigwIntegration {
     resource_ref: String,
     http_method_ref: String,
     lambda_uri_ref: Option<String>,
+    integration_type: String,
+}
+
+/// Parsed aws_api_gateway_integration_response (for MOCK CORS detection)
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct ApigwIntegrationResponse {
+    resource_ref: String,
+    http_method_ref: String,
+    response_parameters: HashMap<String, String>,
 }
 
 /// API Gateway authorizer intermediate structs
@@ -871,6 +881,7 @@ fn parse_tf_file(
     let mut apigw_resources: Vec<ApigwResource> = Vec::new();
     let mut apigw_methods: Vec<ApigwMethod> = Vec::new();
     let mut apigw_integrations: Vec<ApigwIntegration> = Vec::new();
+    let mut apigw_integration_responses: Vec<ApigwIntegrationResponse> = Vec::new();
     let mut apigwv2_routes: Vec<Apigwv2Route> = Vec::new();
     let mut apigwv2_integrations: Vec<Apigwv2Integration> = Vec::new();
     let mut apigw_authorizers: Vec<ApigwAuthorizer> = Vec::new();
@@ -938,6 +949,11 @@ fn parse_tf_file(
                     "aws_api_gateway_integration" => {
                         if let Some(i) = parse_apigw_integration(block) {
                             apigw_integrations.push(i);
+                        }
+                    }
+                    "aws_api_gateway_integration_response" => {
+                        if let Some(ir) = parse_apigw_integration_response(block) {
+                            apigw_integration_responses.push(ir);
                         }
                     }
                     "aws_apigatewayv2_api" => {
@@ -1026,6 +1042,7 @@ fn parse_tf_file(
         &apigw_resources,
         &apigw_methods,
         &apigw_integrations,
+        &apigw_integration_responses,
         &apigw_authorizers,
     );
 
@@ -1204,6 +1221,44 @@ fn parse_apigw_integration(block: &hcl::Block) -> Option<ApigwIntegration> {
             .or_else(|| get_string_attr(body, "http_method"))
             .unwrap_or_default(),
         lambda_uri_ref: get_traversal_attr(body, "uri"),
+        integration_type: get_string_attr(body, "type").unwrap_or_else(|| "AWS_PROXY".to_string()),
+    })
+}
+
+/// Parse aws_api_gateway_integration_response for MOCK CORS headers
+fn parse_apigw_integration_response(block: &hcl::Block) -> Option<ApigwIntegrationResponse> {
+    let body = &block.body;
+    let resource_ref = get_traversal_attr(body, "resource_id").unwrap_or_default();
+    let http_method_ref = get_traversal_attr(body, "http_method")
+        .or_else(|| get_string_attr(body, "http_method"))
+        .unwrap_or_default();
+
+    // Parse response_parameters block/object
+    let mut response_parameters = HashMap::new();
+    for attr in body.attributes() {
+        if attr.key() == "response_parameters" {
+            if let hcl::Expression::Object(obj) = attr.expr() {
+                for (key, value) in obj {
+                    let k = match key {
+                        hcl::ObjectKey::Identifier(id) => id.to_string(),
+                        hcl::ObjectKey::Expression(expr) => {
+                            expr_to_string(expr).unwrap_or_default()
+                        }
+                        _ => continue,
+                    };
+                    let v = expr_to_string(value).unwrap_or_default();
+                    // Strip surrounding single quotes from values like "'*'"
+                    let v = v.trim_matches('\'').to_string();
+                    response_parameters.insert(k, v);
+                }
+            }
+        }
+    }
+
+    Some(ApigwIntegrationResponse {
+        resource_ref,
+        http_method_ref,
+        response_parameters,
     })
 }
 
@@ -1213,6 +1268,7 @@ fn resolve_api_gateway_routes(
     resources: &[ApigwResource],
     methods: &[ApigwMethod],
     integrations: &[ApigwIntegration],
+    integration_responses: &[ApigwIntegrationResponse],
     authorizers: &[ApigwAuthorizer],
 ) {
     // Build resource name → path_part lookup
@@ -1258,8 +1314,58 @@ fn resolve_api_gateway_routes(
         })
         .collect();
 
-    // For each integration, find the matching method and resource to build a route
+    // Detect MOCK integrations (typically CORS preflight) and extract CORS config
     for integration in integrations {
+        if integration.integration_type == "MOCK" {
+            let resource_ref = &integration.resource_ref;
+            // Find matching integration response for CORS headers
+            if let Some(resp) = integration_responses
+                .iter()
+                .find(|ir| ir.resource_ref == *resource_ref)
+            {
+                let params = &resp.response_parameters;
+                let mut cors = crate::project_config::CorsConfig::default();
+                let mut found_cors = false;
+
+                if let Some(origins) =
+                    params.get("method.response.header.Access-Control-Allow-Origin")
+                {
+                    cors.allow_origins = origins.split(',').map(|s| s.trim().to_string()).collect();
+                    found_cors = true;
+                }
+                if let Some(methods) =
+                    params.get("method.response.header.Access-Control-Allow-Methods")
+                {
+                    cors.allow_methods = methods.split(',').map(|s| s.trim().to_string()).collect();
+                    found_cors = true;
+                }
+                if let Some(headers) =
+                    params.get("method.response.header.Access-Control-Allow-Headers")
+                {
+                    cors.allow_headers = headers.split(',').map(|s| s.trim().to_string()).collect();
+                    found_cors = true;
+                }
+                if let Some(max_age) = params.get("method.response.header.Access-Control-Max-Age") {
+                    cors.max_age = max_age.parse().ok();
+                }
+                if let Some(creds) =
+                    params.get("method.response.header.Access-Control-Allow-Credentials")
+                {
+                    cors.allow_credentials = creds == "true";
+                }
+
+                if found_cors {
+                    tracing::info!(
+                        "Detected MOCK CORS integration — auto-configuring CORS from Terraform"
+                    );
+                    config.detected_cors = Some(cors);
+                }
+            } else {
+                tracing::info!("Detected MOCK integration (no integration response found) — OPTIONS handled by built-in CORS layer");
+            }
+            continue;
+        }
+
         // Extract lambda function resource name from uri ref
         let lambda_resource = match &integration.lambda_uri_ref {
             Some(uri) => extract_lambda_name_from_ref(uri),
@@ -2003,7 +2109,8 @@ fn get_string_attr_resolved(
                     let traversal_str = parts.join(".");
                     resolver.resolve_traversal(&traversal_str)
                 }
-                _ => None,
+                // Fall through to expr_to_string for FuncCall (jsonencode etc.), Number, Bool, etc.
+                other => expr_to_string(other),
             }
         })
 }
@@ -3000,6 +3107,30 @@ resource "aws_lambda_function" "api" {
     }
 
     #[test]
+    fn test_deeply_nested_modules_depth3() {
+        let fixture_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nested-modules-depth3");
+
+        let config = parse_terraform_dir(&fixture_dir).unwrap();
+
+        // Module "api" should have its direct function prefixed
+        let api_func = config
+            .functions
+            .iter()
+            .find(|f| f.resource_name == "api.list")
+            .expect("api.list should exist");
+        assert_eq!(api_func.function_name, "api-list");
+
+        // Nested module "api.v2" should have full prefix chain
+        let v2_func = config
+            .functions
+            .iter()
+            .find(|f| f.resource_name == "api.v2.create")
+            .expect("api.v2.create should exist with full module prefix chain");
+        assert_eq!(v2_func.function_name, "v2-create");
+    }
+
+    #[test]
     fn test_locals_interpolation() {
         let tf_content = r#"
 variable "env" {
@@ -3104,6 +3235,101 @@ resource "aws_lambda_function" "per_region" {
             config.functions.len(),
             2,
             "Both functions should parse as single instances"
+        );
+    }
+
+    #[test]
+    fn test_mock_cors_integration_detected() {
+        let tf = r#"
+resource "aws_api_gateway_rest_api" "api" {
+  name = "test-api"
+}
+
+resource "aws_api_gateway_resource" "resource" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_rest_api.api.root_resource_id
+  path_part   = "items"
+}
+
+resource "aws_api_gateway_method" "options" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.resource.id
+  http_method   = "OPTIONS"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "options" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  resource_id = aws_api_gateway_resource.resource.id
+  http_method = aws_api_gateway_method.options.http_method
+  type        = "MOCK"
+  request_templates = {
+    "application/json" = "{\"statusCode\": 200}"
+  }
+}
+
+resource "aws_api_gateway_integration_response" "options" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  resource_id = aws_api_gateway_resource.resource.id
+  http_method = aws_api_gateway_method.options.http_method
+  status_code = "200"
+  response_parameters = {
+    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,Authorization,X-Api-Key'"
+    "method.response.header.Access-Control-Allow-Methods" = "'GET,POST,OPTIONS'"
+    "method.response.header.Access-Control-Allow-Origin"  = "'https://example.com'"
+  }
+}
+
+resource "aws_api_gateway_method" "get" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.resource.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "get" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  resource_id = aws_api_gateway_resource.resource.id
+  http_method = aws_api_gateway_method.get.http_method
+  integration_http_method = "POST"
+  type        = "AWS_PROXY"
+  uri         = aws_lambda_function.handler.invoke_arn
+}
+
+resource "aws_lambda_function" "handler" {
+  function_name = "test-handler"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "handler.zip"
+  role          = "arn:aws:iam::123456789:role/lambda"
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        // MOCK integration should auto-detect CORS
+        assert!(
+            config.detected_cors.is_some(),
+            "Should detect CORS from MOCK integration"
+        );
+        let cors = config.detected_cors.unwrap();
+        assert_eq!(cors.allow_origins, vec!["https://example.com"]);
+        assert_eq!(cors.allow_methods, vec!["GET", "POST", "OPTIONS"]);
+        assert_eq!(
+            cors.allow_headers,
+            vec!["Content-Type", "Authorization", "X-Api-Key"]
+        );
+
+        // The GET route should still be resolved (MOCK integration skipped, Lambda integration kept)
+        let gateway = &config.gateways[0];
+        assert!(
+            !gateway.routes.is_empty(),
+            "Should have at least one Lambda route"
+        );
+        assert!(
+            gateway.routes.iter().any(|r| r.path == "/items"),
+            "Should have /items route"
         );
     }
 }
