@@ -206,12 +206,13 @@ async fn spawn_worker(
     env: &HashMap<String, String>,
 ) -> Result<Worker> {
     match runtime {
-        crate::config::Runtime::Nodejs18 | crate::config::Runtime::Nodejs20 => {
-            spawn_nodejs_worker(handler, source_dir, env).await
-        }
+        crate::config::Runtime::Nodejs18
+        | crate::config::Runtime::Nodejs20
+        | crate::config::Runtime::Nodejs22 => spawn_nodejs_worker(handler, source_dir, env).await,
         crate::config::Runtime::Python310
         | crate::config::Runtime::Python311
-        | crate::config::Runtime::Python312 => spawn_python_worker(handler, source_dir, env).await,
+        | crate::config::Runtime::Python312
+        | crate::config::Runtime::Python313 => spawn_python_worker(handler, source_dir, env).await,
         _ => anyhow::bail!("Process pool not supported for runtime {:?}", runtime),
     }
 }

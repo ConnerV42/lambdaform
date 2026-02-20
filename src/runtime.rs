@@ -25,11 +25,11 @@ use crate::pool::ProcessPool;
 /// Returns a helpful error message with install instructions if missing.
 fn check_runtime_binary(runtime: &Runtime) -> Result<()> {
     let (binary, install_hint) = match runtime {
-        Runtime::Nodejs18 | Runtime::Nodejs20 => (
+        Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Nodejs22 => (
             "node",
             "Install Node.js: https://nodejs.org/ or `nvm install --lts`",
         ),
-        Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => (
+        Runtime::Python310 | Runtime::Python311 | Runtime::Python312 | Runtime::Python313 => (
             "python3",
             "Install Python 3: https://www.python.org/downloads/ or `brew install python3`",
         ),
@@ -508,8 +508,10 @@ impl FunctionExecutor {
 
         // Execute using the same runtime as regular invocation
         let raw_response = match &self.config.runtime {
-            Runtime::Nodejs18 | Runtime::Nodejs20 => self.invoke_nodejs_raw(&payload).await?,
-            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
+            Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Nodejs22 => {
+                self.invoke_nodejs_raw(&payload).await?
+            }
+            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 | Runtime::Python313 => {
                 self.invoke_python_raw(&payload).await?
             }
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
@@ -1206,9 +1208,11 @@ except Exception as e:
             match &self.config.runtime {
                 Runtime::Nodejs18
                 | Runtime::Nodejs20
+                | Runtime::Nodejs22
                 | Runtime::Python310
                 | Runtime::Python311
-                | Runtime::Python312 => {
+                | Runtime::Python312
+                | Runtime::Python313 => {
                     let pool = self
                         .pool
                         .as_ref()
@@ -1232,8 +1236,10 @@ except Exception as e:
         }
 
         match &self.config.runtime {
-            Runtime::Nodejs18 | Runtime::Nodejs20 => self.invoke_nodejs_raw(&payload).await,
-            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
+            Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Nodejs22 => {
+                self.invoke_nodejs_raw(&payload).await
+            }
+            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 | Runtime::Python313 => {
                 self.invoke_python_raw(&payload).await
             }
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {
@@ -1270,9 +1276,11 @@ except Exception as e:
             match &self.config.runtime {
                 Runtime::Nodejs18
                 | Runtime::Nodejs20
+                | Runtime::Nodejs22
                 | Runtime::Python310
                 | Runtime::Python311
-                | Runtime::Python312 => {
+                | Runtime::Python312
+                | Runtime::Python313 => {
                     let pool = self
                         .pool
                         .as_ref()
@@ -1297,8 +1305,10 @@ except Exception as e:
         }
 
         match &self.config.runtime {
-            Runtime::Nodejs18 | Runtime::Nodejs20 => self.invoke_nodejs(&payload).await,
-            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 => {
+            Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Nodejs22 => {
+                self.invoke_nodejs(&payload).await
+            }
+            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 | Runtime::Python313 => {
                 self.invoke_python(&payload).await
             }
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023 => {

@@ -242,12 +242,16 @@ pub enum Runtime {
     Nodejs18,
     #[serde(rename = "nodejs20.x")]
     Nodejs20,
+    #[serde(rename = "nodejs22.x")]
+    Nodejs22,
     #[serde(rename = "python3.10")]
     Python310,
     #[serde(rename = "python3.11")]
     Python311,
     #[serde(rename = "python3.12")]
     Python312,
+    #[serde(rename = "python3.13")]
+    Python313,
     #[serde(rename = "go1.x")]
     Go1,
     #[serde(rename = "provided.al2")]
@@ -272,9 +276,11 @@ impl Runtime {
         match s {
             "nodejs18.x" => Runtime::Nodejs18,
             "nodejs20.x" => Runtime::Nodejs20,
+            "nodejs22.x" => Runtime::Nodejs22,
             "python3.10" => Runtime::Python310,
             "python3.11" => Runtime::Python311,
             "python3.12" => Runtime::Python312,
+            "python3.13" => Runtime::Python313,
             "go1.x" => Runtime::Go1,
             "provided.al2" => Runtime::ProvidedAl2,
             "provided.al2023" => Runtime::ProvidedAl2023,
@@ -290,9 +296,11 @@ impl Runtime {
         match self {
             Runtime::Nodejs18 => "nodejs18.x",
             Runtime::Nodejs20 => "nodejs20.x",
+            Runtime::Nodejs22 => "nodejs22.x",
             Runtime::Python310 => "python3.10",
             Runtime::Python311 => "python3.11",
             Runtime::Python312 => "python3.12",
+            Runtime::Python313 => "python3.13",
             Runtime::Go1 => "go1.x",
             Runtime::ProvidedAl2 => "provided.al2",
             Runtime::ProvidedAl2023 => "provided.al2023",
@@ -305,13 +313,16 @@ impl Runtime {
     }
 
     pub fn is_nodejs(&self) -> bool {
-        matches!(self, Runtime::Nodejs18 | Runtime::Nodejs20)
+        matches!(
+            self,
+            Runtime::Nodejs18 | Runtime::Nodejs20 | Runtime::Nodejs22
+        )
     }
 
     pub fn is_python(&self) -> bool {
         matches!(
             self,
-            Runtime::Python310 | Runtime::Python311 | Runtime::Python312
+            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 | Runtime::Python313
         )
     }
 
@@ -445,9 +456,11 @@ mod tests {
     fn test_runtime_from_str_known() {
         assert_eq!(Runtime::from_str("nodejs18.x"), Runtime::Nodejs18);
         assert_eq!(Runtime::from_str("nodejs20.x"), Runtime::Nodejs20);
+        assert_eq!(Runtime::from_str("nodejs22.x"), Runtime::Nodejs22);
         assert_eq!(Runtime::from_str("python3.10"), Runtime::Python310);
         assert_eq!(Runtime::from_str("python3.11"), Runtime::Python311);
         assert_eq!(Runtime::from_str("python3.12"), Runtime::Python312);
+        assert_eq!(Runtime::from_str("python3.13"), Runtime::Python313);
         assert_eq!(Runtime::from_str("go1.x"), Runtime::Go1);
         assert_eq!(Runtime::from_str("provided.al2"), Runtime::ProvidedAl2);
         assert_eq!(
@@ -469,6 +482,7 @@ mod tests {
     fn test_runtime_is_nodejs() {
         assert!(Runtime::Nodejs18.is_nodejs());
         assert!(Runtime::Nodejs20.is_nodejs());
+        assert!(Runtime::Nodejs22.is_nodejs());
         assert!(!Runtime::Python312.is_nodejs());
         assert!(!Runtime::Go1.is_nodejs());
         assert!(!Runtime::Unknown("foo".to_string()).is_nodejs());
@@ -479,6 +493,7 @@ mod tests {
         assert!(Runtime::Python310.is_python());
         assert!(Runtime::Python311.is_python());
         assert!(Runtime::Python312.is_python());
+        assert!(Runtime::Python313.is_python());
         assert!(!Runtime::Nodejs20.is_python());
         assert!(!Runtime::Go1.is_python());
     }
