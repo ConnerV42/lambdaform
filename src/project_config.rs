@@ -12,7 +12,7 @@ use crate::plugin::PluginEntry;
 /// Top-level project config (lambdaform.yaml)
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+
 pub struct ProjectConfig {
     /// Default port for the local server
     pub port: Option<u16>,
@@ -51,7 +51,7 @@ pub struct ProjectConfig {
 
 /// Per-gateway overrides
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+
 pub struct GatewayOverride {
     /// Override the port for this gateway
     pub port: Option<u16>,
@@ -59,7 +59,7 @@ pub struct GatewayOverride {
 
 /// Debug configuration
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+
 pub struct DebugConfig {
     /// Enable Node.js inspector (default: false)
     #[serde(default)]
@@ -106,7 +106,7 @@ fn default_true() -> bool {
 
 /// CORS configuration
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+
 pub struct CorsConfig {
     /// Allowed origins (default: ["*"])
     #[serde(default = "default_origins")]
@@ -151,7 +151,7 @@ impl Default for CorsConfig {
 
 /// Per-function overrides
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+
 pub struct FunctionOverride {
     /// Override the handler
     pub handler: Option<String>,
