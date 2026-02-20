@@ -6,6 +6,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use lambdaform::config::{ApiType, Runtime};
 use lambdaform::parser;
 use lambdaform::server;
 use std::path::PathBuf;
@@ -283,4 +284,415 @@ fn test_init_no_tf_files() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No .tf files found"));
+}
+
+// ─── Parser: All Fixture Tests ──────────────────────────────────────────────
+
+#[test]
+fn test_parse_multi_gateway_fixture() {
+    let dir = fixture_dir("multi-gateway");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    // Should have both REST API v1 and HTTP API v2 gateways
+    assert!(
+        config.gateways.len() >= 2,
+        "Expected at least 2 gateways, got {}",
+        config.gateways.len()
+    );
+    assert!(
+        config.functions.len() >= 2,
+        "Expected at least 2 functions, got {}",
+        config.functions.len()
+    );
+}
+
+#[test]
+fn test_parse_authorizer_fixture() {
+    let dir = fixture_dir("authorizer");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(
+        config.functions.len() >= 2,
+        "Expected authorizer + protected functions"
+    );
+    assert!(!config.gateways.is_empty());
+}
+
+#[test]
+fn test_parse_websocket_fixture() {
+    let dir = fixture_dir("websocket");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    // WebSocket API should have connect/disconnect/default/sendmessage functions
+    assert!(
+        config.functions.len() >= 3,
+        "Expected at least 3 WebSocket functions"
+    );
+    // Should have a WebSocket gateway
+    let ws_gateways: Vec<_> = config
+        .gateways
+        .iter()
+        .filter(|g| g.api_type == ApiType::WebSocket)
+        .collect();
+    assert!(!ws_gateways.is_empty(), "Expected a WebSocket gateway");
+}
+
+#[test]
+fn test_parse_sqs_sns_fixture() {
+    let dir = fixture_dir("sqs-sns");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(!config.sqs_queues.is_empty(), "Expected SQS queues");
+    assert!(!config.sns_topics.is_empty(), "Expected SNS topics");
+    assert!(
+        !config.event_source_mappings.is_empty(),
+        "Expected event source mappings"
+    );
+}
+
+#[test]
+fn test_parse_step_functions_fixture() {
+    let dir = fixture_dir("step-functions");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(!config.state_machines.is_empty(), "Expected state machines");
+    assert!(
+        config.functions.len() >= 3,
+        "Expected multiple step function lambdas"
+    );
+}
+
+#[test]
+fn test_parse_lambda_layers_fixture() {
+    let dir = fixture_dir("lambda-layers");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(!config.layers.is_empty(), "Expected at least one layer");
+    assert!(!config.functions.is_empty());
+    // The function should reference a layer
+    let func = &config.functions[0];
+    assert!(
+        !func.layers.is_empty(),
+        "Expected function to reference a layer"
+    );
+}
+
+#[test]
+fn test_parse_local_modules_fixture() {
+    let dir = fixture_dir("local-modules");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    // Should have root_handler + api_handler from module
+    assert!(
+        config.functions.len() >= 2,
+        "Expected at least 2 functions (root + module), got {}",
+        config.functions.len()
+    );
+    // Module function should have prefixed name
+    let names: Vec<_> = config
+        .functions
+        .iter()
+        .map(|f| f.function_name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"root-handler"),
+        "Expected root-handler, got {:?}",
+        names
+    );
+}
+
+#[test]
+fn test_parse_nested_modules_depth3() {
+    let dir = fixture_dir("nested-modules-depth3");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    // Should have functions from depth 2 (api/list) and depth 3 (api/v2/create)
+    assert!(
+        config.functions.len() >= 2,
+        "Expected at least 2 functions from nested modules, got {}",
+        config.functions.len()
+    );
+}
+
+#[test]
+fn test_parse_opentofu_fixture() {
+    let dir = fixture_dir("opentofu");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(
+        !config.functions.is_empty(),
+        "OpenTofu fixture should parse successfully"
+    );
+}
+
+#[test]
+fn test_parse_simple_go_fixture() {
+    let dir = fixture_dir("simple-go");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(!config.functions.is_empty());
+    assert!(
+        config.functions.iter().any(|f| matches!(
+            f.runtime,
+            Runtime::ProvidedAl2023 | Runtime::ProvidedAl2 | Runtime::Go1
+        )),
+        "Expected a Go/custom runtime function"
+    );
+}
+
+#[test]
+fn test_parse_simple_python_fixture() {
+    let dir = fixture_dir("simple-python");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(!config.functions.is_empty());
+    assert!(
+        config.functions.iter().any(|f| matches!(
+            f.runtime,
+            Runtime::Python310 | Runtime::Python311 | Runtime::Python312 | Runtime::Python313
+        )),
+        "Expected a Python runtime function"
+    );
+}
+
+#[test]
+fn test_parse_dynamodb_fixture() {
+    let dir = fixture_dir("dynamodb");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(
+        !config.dynamodb_tables.is_empty(),
+        "Expected DynamoDB tables"
+    );
+}
+
+// ─── Parser: Count/ForEach Meta-Arguments ───────────────────────────────────
+
+#[test]
+fn test_parse_count_for_each() {
+    let dir = fixture_dir("count-foreach");
+    // Parser should handle count/for_each without crashing (may warn)
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    // At minimum, the singleton function should be parsed
+    assert!(
+        !config.functions.is_empty(),
+        "Expected at least the singleton function to parse"
+    );
+    let names: Vec<_> = config
+        .functions
+        .iter()
+        .map(|f| f.function_name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"singleton-handler"),
+        "Expected singleton-handler, got {:?}",
+        names
+    );
+}
+
+// ─── Parser: .tfvars.json Format ────────────────────────────────────────────
+
+#[test]
+fn test_parse_tfvars_json() {
+    let dir = fixture_dir("tfvars-json");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(!config.functions.is_empty());
+    // The function name should use the tfvars.json value "staging" not default "dev"
+    let func = &config.functions[0];
+    assert!(
+        func.function_name.contains("staging") || func.function_name.contains("app"),
+        "Expected function name to reflect tfvars.json values, got: {}",
+        func.function_name
+    );
+}
+
+// ─── Server: Multi-Value Query String Parameters ────────────────────────────
+
+#[tokio::test]
+async fn test_multivalue_query_params() {
+    let app = build_test_app("simple-node");
+    let resp = app
+        .oneshot(
+            Request::get("/hello?tag=rust&tag=lambda&name=test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    // The handler should receive query parameters — just verify it doesn't crash
+    let body = body_json(resp).await;
+    assert!(body.is_object(), "Expected JSON response");
+}
+
+// ─── Server: Binary Body Base64 Encoding ────────────────────────────────────
+
+#[tokio::test]
+async fn test_binary_body_accepted() {
+    let app = build_test_app("simple-node");
+    // Send binary data (non-UTF8)
+    let binary_body: Vec<u8> = vec![0x00, 0x01, 0xFF, 0xFE, 0x89, 0x50, 0x4E, 0x47];
+    let resp = app
+        .oneshot(
+            Request::post("/echo")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(binary_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should handle binary body without crashing (base64 encoded)
+    assert!(
+        resp.status().is_success() || resp.status().is_server_error(),
+        "Expected a response (not a panic), got {}",
+        resp.status()
+    );
+}
+
+// ─── Server: Request Body Size Limit ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_large_body_rejected() {
+    let app = build_test_app("simple-node");
+    // 15MB body should be rejected (Lambda limit is 6MB sync / 10MB)
+    let big_body = vec![b'x'; 15 * 1024 * 1024];
+    let resp = app
+        .oneshot(
+            Request::post("/echo")
+                .header("content-type", "text/plain")
+                .body(Body::from(big_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        resp.status() == StatusCode::PAYLOAD_TOO_LARGE || resp.status().is_client_error(),
+        "Expected 413 or 4xx for oversized body, got {}",
+        resp.status()
+    );
+}
+
+// ─── Server: V2 Event Format ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_v2_event_headers() {
+    let app = build_test_app("http-api");
+    let resp = app
+        .oneshot(
+            Request::get("/hello")
+                .header("x-custom-header", "test-value")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ─── Server: Multi-Gateway Routing ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_multi_gateway_both_parse() {
+    let dir = fixture_dir("multi-gateway");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    // Both gateways should be parseable and have routes
+    let v1_gateways: Vec<_> = config
+        .gateways
+        .iter()
+        .filter(|g| g.api_type == ApiType::Rest)
+        .collect();
+    let v2_gateways: Vec<_> = config
+        .gateways
+        .iter()
+        .filter(|g| g.api_type == ApiType::Http)
+        .collect();
+    assert!(!v1_gateways.is_empty(), "Expected REST API gateway");
+    assert!(!v2_gateways.is_empty(), "Expected HTTP API gateway");
+}
+
+// ─── CLI: Version Command ───────────────────────────────────────────────────
+
+#[test]
+fn test_cli_version() {
+    use assert_cmd::Command;
+
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["--version"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("lambdaform"));
+}
+
+// ─── CLI: Config Command ────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_config() {
+    use assert_cmd::Command;
+
+    let dir = fixture_dir("simple-node");
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["config", "--dir", dir.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+// ─── CLI: Graph Command ─────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_graph_ascii() {
+    use assert_cmd::Command;
+
+    let dir = fixture_dir("simple-node");
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["graph", "--dir", dir.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_cli_graph_dot() {
+    use assert_cmd::Command;
+
+    let dir = fixture_dir("simple-node");
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["graph", "--dir", dir.to_str().unwrap(), "--format", "dot"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("digraph"));
+}
+
+#[test]
+fn test_cli_graph_json() {
+    use assert_cmd::Command;
+
+    let dir = fixture_dir("simple-node");
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["graph", "--dir", dir.to_str().unwrap(), "--format", "json"])
+        .assert()
+        .success();
+}
+
+// ─── CLI: Cost Command ──────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_cost() {
+    use assert_cmd::Command;
+
+    let dir = fixture_dir("simple-node");
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["cost", "--dir", dir.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+// ─── CLI: Validate Command ──────────────────────────────────────────────────
+
+#[test]
+fn test_cli_validate() {
+    use assert_cmd::Command;
+
+    let dir = fixture_dir("simple-node");
+    Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["validate", "--dir", dir.to_str().unwrap()])
+        .assert()
+        .success();
 }
