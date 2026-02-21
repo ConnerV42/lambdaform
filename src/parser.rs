@@ -2086,15 +2086,15 @@ fn parse_function_url(name: &str, block: &hcl::Block) -> Option<crate::config::F
     // function_name is a reference like aws_lambda_function.my_func.function_name
     // We extract the resource name from the reference
     let function_resource = get_string_attr(body, "function_name")
-        .and_then(|s| {
+        .map(|s| {
             // Could be a reference like aws_lambda_function.xxx.function_name
             if s.starts_with("aws_lambda_function.") {
                 let parts: Vec<&str> = s.split('.').collect();
                 if parts.len() >= 2 {
-                    return Some(parts[1].to_string());
+                    return parts[1].to_string();
                 }
             }
-            Some(s)
+            s
         })
         .unwrap_or_default();
 
@@ -2166,7 +2166,11 @@ fn get_string_attr_resolved(
                         }))
                         .collect();
                     let traversal_str = parts.join(".");
-                    resolver.resolve_traversal(&traversal_str)
+                    // Try to resolve via variables/locals, fall back to raw traversal string
+                    // (needed for resource references like aws_lambda_function.xxx.function_name)
+                    resolver
+                        .resolve_traversal(&traversal_str)
+                        .or(Some(traversal_str))
                 }
                 // Fall through to expr_to_string for FuncCall (jsonencode etc.), Number, Bool, etc.
                 other => expr_to_string(other),
