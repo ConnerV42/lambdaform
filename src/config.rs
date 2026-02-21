@@ -43,6 +43,10 @@ pub struct LambdaformConfig {
     #[serde(default)]
     pub archive_files: Vec<ArchiveFileConfig>,
 
+    /// Lambda Function URL configurations
+    #[serde(default)]
+    pub function_urls: Vec<FunctionUrlConfig>,
+
     /// CORS config auto-detected from MOCK integrations in Terraform
     /// Used as fallback when no explicit CORS config in lambdaform.yaml
     #[serde(skip)]
@@ -602,6 +606,40 @@ impl Runtime {
             Runtime::Go1 | Runtime::ProvidedAl2 | Runtime::ProvidedAl2023
         )
     }
+}
+
+/// Lambda Function URL configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionUrlConfig {
+    /// Terraform resource name (aws_lambda_function_url.NAME)
+    pub resource_name: String,
+
+    /// Target Lambda function resource name
+    pub function_resource: String,
+
+    /// Authorization type (NONE or AWS_IAM)
+    pub auth_type: FunctionUrlAuthType,
+
+    /// CORS configuration (optional)
+    pub cors: Option<FunctionUrlCors>,
+}
+
+/// Function URL authorization type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FunctionUrlAuthType {
+    None,
+    AwsIam,
+}
+
+/// Function URL CORS configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionUrlCors {
+    pub allow_origins: Vec<String>,
+    pub allow_methods: Vec<String>,
+    pub allow_headers: Vec<String>,
+    pub expose_headers: Vec<String>,
+    pub max_age: Option<u64>,
+    pub allow_credentials: bool,
 }
 
 /// API Gateway configuration

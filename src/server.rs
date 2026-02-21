@@ -58,6 +58,15 @@ pub struct GatewayBinding {
     pub port: u16,
 }
 
+/// Function URL assignment: which function URL runs on which port
+#[derive(Debug, Clone)]
+pub struct FunctionUrlBinding {
+    pub function_resource: String,
+    pub function_url_resource: String,
+    pub port: u16,
+    pub cors: Option<crate::config::FunctionUrlCors>,
+}
+
 /// Shared application state (behind RwLock for hot reload)
 pub struct AppState {
     pub inner: RwLock<AppStateInner>,
@@ -266,6 +275,369 @@ pub fn build_app(
         .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB, matching API Gateway REST limit
         .layer(cors)
         .with_state(state)
+}
+
+/// State for a Function URL server (single function target)
+pub struct FunctionUrlState {
+    pub config: LambdaformConfig,
+    pub source_dir: std::path::PathBuf,
+    pub function_resource: String,
+    pub debug: Option<DebugOptions>,
+    pub pool: Arc<ProcessPool>,
+}
+
+/// Build an axum app for a Lambda Function URL
+pub fn build_function_url_app(
+    config: LambdaformConfig,
+    source_dir: std::path::PathBuf,
+    function_resource: String,
+    debug: Option<DebugOptions>,
+    cors: Option<&crate::config::FunctionUrlCors>,
+) -> Router {
+    let state = Arc::new(FunctionUrlState {
+        config,
+        source_dir,
+        function_resource,
+        debug,
+        pool: Arc::new(ProcessPool::new()),
+    });
+
+    let cors_layer = if let Some(c) = cors {
+        build_function_url_cors_layer(c)
+    } else {
+        CorsLayer::permissive()
+    };
+
+    Router::new()
+        .route("/*path", any(handle_function_url_request))
+        .route("/", any(handle_function_url_request))
+        .layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024)) // 6MB for Function URLs
+        .layer(cors_layer)
+        .with_state(state)
+}
+
+/// Build CORS layer from Function URL CORS config
+fn build_function_url_cors_layer(cors: &crate::config::FunctionUrlCors) -> CorsLayer {
+    use axum::http::HeaderValue;
+    use tower_http::cors::AllowOrigin;
+
+    let mut layer = CorsLayer::new();
+
+    if cors.allow_origins.iter().any(|o| o == "*") {
+        layer = layer.allow_origin(Any);
+    } else if !cors.allow_origins.is_empty() {
+        let origins: Vec<HeaderValue> = cors
+            .allow_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        layer = layer.allow_origin(AllowOrigin::list(origins));
+    }
+
+    if cors.allow_methods.iter().any(|m| m == "*") {
+        layer = layer.allow_methods(Any);
+    } else if !cors.allow_methods.is_empty() {
+        let methods: Vec<axum::http::Method> = cors
+            .allow_methods
+            .iter()
+            .filter_map(|m| m.parse().ok())
+            .collect();
+        layer = layer.allow_methods(methods);
+    }
+
+    if cors.allow_headers.iter().any(|h| h == "*") {
+        layer = layer.allow_headers(Any);
+    } else if !cors.allow_headers.is_empty() {
+        let hdr_names: Vec<axum::http::HeaderName> = cors
+            .allow_headers
+            .iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        layer = layer.allow_headers(hdr_names);
+    }
+
+    if !cors.expose_headers.is_empty() {
+        let hdr_names: Vec<axum::http::HeaderName> = cors
+            .expose_headers
+            .iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        layer = layer.expose_headers(hdr_names);
+    }
+
+    if cors.allow_credentials {
+        layer = layer.allow_credentials(true);
+    }
+
+    if let Some(max_age) = cors.max_age {
+        layer = layer.max_age(std::time::Duration::from_secs(max_age));
+    }
+
+    layer
+}
+
+/// Handle a request to a Lambda Function URL (all paths → single function, v2 event format)
+async fn handle_function_url_request(
+    method: Method,
+    path_param: Option<Path<String>>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    State(state): State<Arc<FunctionUrlState>>,
+    body: Bytes,
+) -> Response {
+    let request_start = std::time::Instant::now();
+    let path = match path_param {
+        Some(Path(p)) => format!("/{}", p),
+        None => "/".to_string(),
+    };
+
+    let query_str = if query.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "?{}",
+            query
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("&")
+        )
+    };
+
+    let body_size = body.len();
+
+    // Enforce 6MB payload limit for Function URLs
+    if body_size > 6 * 1024 * 1024 {
+        tracing::warn!(
+            "❌ {} {}{} — 413 Payload Too Large ({} bytes)",
+            method,
+            path,
+            query_str,
+            body_size
+        );
+        return (StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large").into_response();
+    }
+
+    tracing::info!("→ {} {}{} ({} bytes)", method, path, query_str, body_size);
+
+    // Find the target function
+    let lambda = state
+        .config
+        .functions
+        .iter()
+        .find(|f| f.resource_name == state.function_resource);
+
+    let lambda = match lambda {
+        Some(l) => l.clone(),
+        None => {
+            tracing::error!("Function '{}' not found in config", state.function_resource);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Function not found").into_response();
+        }
+    };
+
+    // Build headers map
+    let headers_map: HashMap<String, String> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    // Build body string, detect binary content
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_binary = is_binary_content_type(content_type);
+    let (body_str, body_is_base64) = if body.is_empty() {
+        (None, false)
+    } else if is_binary {
+        use base64::Engine;
+        (
+            Some(base64::engine::general_purpose::STANDARD.encode(&body)),
+            true,
+        )
+    } else {
+        (String::from_utf8(body.to_vec()).ok(), false)
+    };
+
+    // Build query params
+    let query_params = if query.is_empty() {
+        None
+    } else {
+        Some(query.clone())
+    };
+
+    // Extract cookies
+    let cookies = headers_map.get("cookie").map(|cookie_header| {
+        cookie_header
+            .split(';')
+            .map(|c| c.trim().to_string())
+            .collect::<Vec<String>>()
+    });
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let _route_key = format!("{} {}", method, path);
+
+    // Function URL uses v2 event format with minor differences
+    let event_v2 = LambdaEventV2 {
+        version: "2.0".to_string(),
+        route_key: "$default".to_string(),
+        raw_path: path.clone(),
+        raw_query_string: query
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&"),
+        cookies,
+        path_parameters: None,
+        query_string_parameters: query_params,
+        stage_variables: None,
+        headers: Some(headers_map.clone()),
+        body: body_str,
+        is_base64_encoded: body_is_base64,
+        request_context: crate::runtime::RequestContextV2 {
+            stage: "$default".to_string(),
+            request_id: request_id.clone(),
+            api_id: "lambdaform-furl".to_string(),
+            route_key: "$default".to_string(),
+            account_id: "123456789012".to_string(),
+            domain_name: format!("{}.lambda-url.us-east-1.on.aws", state.function_resource),
+            domain_prefix: state.function_resource.clone(),
+            time: format_timestamp(),
+            time_epoch: now.as_millis() as u64,
+            http: crate::runtime::RequestContextHttp {
+                method: method.to_string(),
+                path: path.clone(),
+                protocol: "HTTP/1.1".to_string(),
+                source_ip: "127.0.0.1".to_string(),
+                user_agent: headers
+                    .get("user-agent")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("lambdaform/local")
+                    .to_string(),
+            },
+        },
+    };
+
+    let event = serde_json::to_value(event_v2).unwrap_or_default();
+
+    // Resolve layer paths and source directory
+    let layer_paths = resolve_layer_paths(&lambda, &state.config.layers, &state.source_dir);
+    let fn_source_dir =
+        lambda.resolve_source_dir_with_archives(&state.source_dir, &state.config.archive_files);
+
+    // Execute the function
+    let executor = FunctionExecutor::new(lambda.clone(), fn_source_dir)
+        .with_debug(state.debug.clone())
+        .with_pool(Some(state.pool.clone()))
+        .with_layer_paths(layer_paths);
+
+    let result = executor.invoke_raw_event(event).await;
+
+    let elapsed = request_start.elapsed();
+
+    match result {
+        Ok(response) => {
+            let response: serde_json::Value = response;
+            let status_code = response
+                .get("statusCode")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(200) as u16;
+
+            // Emit TUI event
+            #[cfg(feature = "tui")]
+            emit_tui_event(crate::tui::ui::RequestEvent {
+                method: method.to_string(),
+                path: format!("{}{}", path, query_str),
+                status: status_code,
+                duration: elapsed,
+                function: lambda.function_name.clone(),
+                timestamp: chrono::Utc::now(),
+            });
+
+            let response_body = response
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+
+            tracing::info!(
+                "← {} {}{} → {} ({:.1}ms)",
+                method,
+                path,
+                query_str,
+                status_code,
+                elapsed.as_secs_f64() * 1000.0
+            );
+
+            // Build response with headers from Lambda
+            let mut builder = axum::http::Response::builder()
+                .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK));
+
+            if let Some(hdrs) = response
+                .get("headers")
+                .and_then(serde_json::Value::as_object)
+            {
+                for (k, v) in hdrs {
+                    if let Some(val) = v.as_str() {
+                        builder = builder.header(k, val);
+                    }
+                }
+            }
+
+            // Handle base64-encoded response bodies
+            let is_base64 = response
+                .get("isBase64Encoded")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+
+            if is_base64 {
+                use base64::Engine;
+                if let Ok(decoded) =
+                    base64::engine::general_purpose::STANDARD.decode(&response_body)
+                {
+                    return builder
+                        .body(axum::body::Body::from(decoded))
+                        .unwrap_or_default()
+                        .into_response();
+                }
+            }
+
+            builder
+                .body(axum::body::Body::from(response_body))
+                .unwrap_or_default()
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(
+                "← {} {}{} → 502 ({:.1}ms): {}",
+                method,
+                path,
+                query_str,
+                elapsed.as_secs_f64() * 1000.0,
+                e
+            );
+
+            #[cfg(feature = "tui")]
+            emit_tui_event(crate::tui::ui::RequestEvent {
+                method: method.to_string(),
+                path: format!("{}{}", path, query_str),
+                status: 502,
+                duration: elapsed,
+                function: lambda.function_name.clone(),
+                timestamp: chrono::Utc::now(),
+            });
+
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Function execution error: {}", e),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Create a future that resolves on Ctrl+C (SIGINT).

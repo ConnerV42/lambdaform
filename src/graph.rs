@@ -587,6 +587,7 @@ mod tests {
             }],
             state_machines: vec![],
             archive_files: vec![],
+            function_urls: vec![],
             detected_cors: None,
         }
     }

@@ -696,3 +696,67 @@ fn test_cli_validate() {
         .assert()
         .success();
 }
+
+// ─── Function URLs ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_parse_function_urls() {
+    let dir = fixture_dir("function-url");
+    let config = lambdaform::parser::parse_terraform_dir(&dir).unwrap();
+
+    assert_eq!(
+        config.function_urls.len(),
+        2,
+        "Should parse 2 function URLs"
+    );
+
+    // First function URL
+    let api_url = config
+        .function_urls
+        .iter()
+        .find(|f| f.resource_name == "api_url")
+        .unwrap();
+    assert_eq!(api_url.function_resource, "api");
+    assert_eq!(
+        api_url.auth_type,
+        lambdaform::config::FunctionUrlAuthType::None
+    );
+    let cors = api_url.cors.as_ref().expect("Should have CORS config");
+    assert_eq!(
+        cors.allow_origins,
+        vec!["https://example.com", "https://app.example.com"]
+    );
+    assert_eq!(cors.allow_methods, vec!["GET", "POST", "PUT", "DELETE"]);
+    assert_eq!(cors.allow_headers, vec!["Content-Type", "Authorization"]);
+    assert_eq!(cors.expose_headers, vec!["X-Request-Id"]);
+    assert_eq!(cors.max_age, Some(3600));
+    assert!(cors.allow_credentials);
+
+    // Second function URL (no CORS)
+    let worker_url = config
+        .function_urls
+        .iter()
+        .find(|f| f.resource_name == "worker_url")
+        .unwrap();
+    assert_eq!(worker_url.function_resource, "worker");
+    assert_eq!(
+        worker_url.auth_type,
+        lambdaform::config::FunctionUrlAuthType::AwsIam
+    );
+    assert!(worker_url.cors.is_none());
+}
+
+#[test]
+fn test_function_url_server_builds() {
+    let dir = fixture_dir("function-url");
+    let config = lambdaform::parser::parse_terraform_dir(&dir).unwrap();
+
+    // Should be able to build a function URL app without panicking
+    let _app = lambdaform::server::build_function_url_app(
+        config.clone(),
+        dir.to_path_buf(),
+        "api".to_string(),
+        None,
+        config.function_urls[0].cors.as_ref(),
+    );
+}

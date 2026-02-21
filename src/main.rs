@@ -566,6 +566,34 @@ async fn cmd_start(
         vec![]
     };
 
+    // Compute function URL bindings
+    let function_url_bindings: Vec<server::FunctionUrlBinding> = config
+        .function_urls
+        .iter()
+        .enumerate()
+        .map(|(i, furl)| {
+            // Function URLs get ports starting at base_port + 200
+            let furl_port = port + 200 + i as u16;
+            server::FunctionUrlBinding {
+                function_resource: furl.function_resource.clone(),
+                function_url_resource: furl.resource_name.clone(),
+                port: furl_port,
+                cors: furl.cors.clone(),
+            }
+        })
+        .collect();
+
+    // Log function URLs
+    if !function_url_bindings.is_empty() {
+        println!("\n🔗 Function URLs ({}):", function_url_bindings.len());
+        for binding in &function_url_bindings {
+            println!(
+                "   📡 {} → http://localhost:{}",
+                binding.function_resource, binding.port
+            );
+        }
+    }
+
     // Log discovered routes
     if !config.gateways.is_empty() {
         if multi_gateway {
@@ -598,7 +626,7 @@ async fn cmd_start(
                 }
             }
         }
-    } else {
+    } else if config.function_urls.is_empty() {
         println!(
             "\n⚠️  No API Gateway routes found — functions available via `lambdaform invoke` only"
         );
@@ -817,6 +845,45 @@ async fn cmd_start(
         None
     };
 
+    // Start Function URL servers (each gets its own port)
+    let mut furl_handles = Vec::new();
+    for binding in &function_url_bindings {
+        let furl_config = config.clone();
+        let furl_dir = dir.clone();
+        let furl_resource = binding.function_resource.clone();
+        let furl_port = binding.port;
+        let furl_cors = binding.cors.clone();
+        let furl_debug = debug_options.clone();
+
+        let handle = tokio::spawn(async move {
+            let app = server::build_function_url_app(
+                furl_config,
+                furl_dir,
+                furl_resource.clone(),
+                furl_debug,
+                furl_cors.as_ref(),
+            );
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], furl_port));
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to bind Function URL for {} on port {}: {}",
+                    furl_resource,
+                    furl_port,
+                    e
+                )
+            })?;
+            tracing::info!(
+                "🔗 Function URL for {} listening on http://{}",
+                furl_resource,
+                addr
+            );
+            axum::serve(listener, app)
+                .await
+                .map_err(|e| anyhow::anyhow!("Function URL server error: {}", e))
+        });
+        furl_handles.push(handle);
+    }
+
     // Start HTTP server(s) (blocks until shutdown)
     if http_bindings.len() > 1 {
         server::start_multi_gateway(
@@ -835,10 +902,9 @@ async fn cmd_start(
         } else {
             server::start_server(config, dir, port, cors_config.as_ref(), debug_options).await?;
         }
-    } else if !ws_handles.is_empty() {
-        // Only WebSocket gateways, wait for them
-        let (result, _, _) = futures::future::select_all(ws_handles).await;
-        result??;
+    } else if !ws_handles.is_empty() || !furl_handles.is_empty() {
+        // Only WebSocket gateways and/or Function URLs, wait for signal
+        tokio::signal::ctrl_c().await?;
     }
 
     // Wait for TUI to clean up if it was running

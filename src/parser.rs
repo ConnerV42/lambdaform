@@ -1011,6 +1011,11 @@ fn parse_tf_file(
                             config.event_source_mappings.push(esm);
                         }
                     }
+                    "aws_lambda_function_url" => {
+                        if let Some(furl) = parse_function_url(resource_name, block) {
+                            config.function_urls.push(furl);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2075,6 +2080,60 @@ fn get_traversal_attr(body: &hcl::Body, name: &str) -> Option<String> {
 }
 
 /// Get a string attribute from HCL body (without variable resolution)
+fn parse_function_url(name: &str, block: &hcl::Block) -> Option<crate::config::FunctionUrlConfig> {
+    let body = &block.body;
+
+    // function_name is a reference like aws_lambda_function.my_func.function_name
+    // We extract the resource name from the reference
+    let function_resource = get_string_attr(body, "function_name")
+        .and_then(|s| {
+            // Could be a reference like aws_lambda_function.xxx.function_name
+            if s.starts_with("aws_lambda_function.") {
+                let parts: Vec<&str> = s.split('.').collect();
+                if parts.len() >= 2 {
+                    return Some(parts[1].to_string());
+                }
+            }
+            Some(s)
+        })
+        .unwrap_or_default();
+
+    if function_resource.is_empty() {
+        return None;
+    }
+
+    let auth_type = get_string_attr(body, "authorization_type")
+        .map(|s| match s.to_uppercase().as_str() {
+            "NONE" => crate::config::FunctionUrlAuthType::None,
+            _ => crate::config::FunctionUrlAuthType::AwsIam,
+        })
+        .unwrap_or(crate::config::FunctionUrlAuthType::None);
+
+    // Parse CORS block if present
+    let cors = block
+        .body
+        .blocks()
+        .find(|b| b.identifier.as_str() == "cors")
+        .map(|cors_block| {
+            let cb = &cors_block.body;
+            crate::config::FunctionUrlCors {
+                allow_origins: get_list_string_attrs(cb, "allow_origins"),
+                allow_methods: get_list_string_attrs(cb, "allow_methods"),
+                allow_headers: get_list_string_attrs(cb, "allow_headers"),
+                expose_headers: get_list_string_attrs(cb, "expose_headers"),
+                max_age: get_number_attr(cb, "max_age").map(|n| n as u64),
+                allow_credentials: get_bool_attr(cb, "allow_credentials").unwrap_or(false),
+            }
+        });
+
+    Some(crate::config::FunctionUrlConfig {
+        resource_name: name.to_string(),
+        function_resource,
+        auth_type,
+        cors,
+    })
+}
+
 fn get_string_attr(body: &hcl::Body, name: &str) -> Option<String> {
     get_string_attr_resolved(body, name, &VariableResolver::default())
 }
