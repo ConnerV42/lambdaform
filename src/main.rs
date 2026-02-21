@@ -1497,8 +1497,8 @@ fn cmd_cost(
     use lambdaform::history;
 
     let architecture = match arch.to_lowercase().as_str() {
-        "arm" | "arm64" | "graviton" => cost::Architecture::Arm,
-        _ => cost::Architecture::X86,
+        "arm" | "arm64" | "graviton" => cost::Architecture::Arm64,
+        _ => cost::Architecture::X86_64,
     };
 
     // Load history

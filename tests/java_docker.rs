@@ -48,6 +48,7 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         timeout: 60,
         memory_size: 512,
         layers: Vec::new(),
+        architecture: lambdaform::config::Architecture::default(),
     };
 
     let executor = FunctionExecutor::new(config, dir.path().to_path_buf());

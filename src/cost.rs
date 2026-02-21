@@ -27,12 +27,8 @@ const FREE_TIER_REQUESTS: u64 = 1_000_000;
 /// Free tier: GB-seconds per month
 const FREE_TIER_GB_SECONDS: f64 = 400_000.0;
 
-/// Architecture for pricing
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Architecture {
-    X86,
-    Arm,
-}
+/// Re-export Architecture from config
+pub use crate::config::Architecture;
 
 /// Cost breakdown for a single function
 #[derive(Debug, Clone)]
@@ -96,8 +92,8 @@ pub fn estimate_costs(
     }
 
     let cost_per_gb_second = match architecture {
-        Architecture::X86 => COST_PER_GB_SECOND_X86,
-        Architecture::Arm => COST_PER_GB_SECOND_ARM,
+        Architecture::X86_64 => COST_PER_GB_SECOND_X86,
+        Architecture::Arm64 => COST_PER_GB_SECOND_ARM,
     };
 
     // Build function lookup by resource_name and function_name
@@ -275,8 +271,8 @@ pub fn format_report(report: &CostReport) -> String {
     let mut out = String::new();
 
     let arch_label = match report.architecture {
-        Architecture::X86 => "x86_64",
-        Architecture::Arm => "ARM64 (Graviton)",
+        Architecture::X86_64 => "x86_64",
+        Architecture::Arm64 => "ARM64 (Graviton)",
     };
 
     out.push_str(&format!("\n💰 Lambda Cost Estimation ({})\n", arch_label));
@@ -383,8 +379,8 @@ pub fn format_report_json(report: &CostReport) -> serde_json::Value {
 
     let mut result = serde_json::json!({
         "architecture": match report.architecture {
-            Architecture::X86 => "x86_64",
-            Architecture::Arm => "arm64",
+            Architecture::X86_64 => "x86_64",
+            Architecture::Arm64 => "arm64",
         },
         "total_invocations": report.total_invocations,
         "total_gb_seconds": report.total_gb_seconds,
@@ -456,12 +452,13 @@ mod tests {
             timeout: 30,
             memory_size: memory_mb,
             layers: Vec::new(),
+            architecture: crate::config::Architecture::default(),
         }
     }
 
     #[test]
     fn test_empty_history() {
-        let report = estimate_costs(&[], &[], Architecture::X86);
+        let report = estimate_costs(&[], &[], Architecture::X86_64);
         assert_eq!(report.total_invocations, 0);
         assert_eq!(report.total_cost, 0.0);
     }
@@ -474,7 +471,7 @@ mod tests {
             make_entry("api_handler", 150, "2026-02-16T10:00:02Z"),
         ];
         let functions = vec![make_lambda("api_handler", 256)];
-        let report = estimate_costs(&entries, &functions, Architecture::X86);
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
 
         assert_eq!(report.total_invocations, 3);
         assert_eq!(report.functions.len(), 1);
@@ -503,7 +500,7 @@ mod tests {
             make_entry("func_a", 75, "2026-02-16T10:00:02Z"),
         ];
         let functions = vec![make_lambda("func_a", 128), make_lambda("func_b", 512)];
-        let report = estimate_costs(&entries, &functions, Architecture::X86);
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
 
         assert_eq!(report.total_invocations, 3);
         assert_eq!(report.functions.len(), 2);
@@ -514,8 +511,8 @@ mod tests {
         let entries = vec![make_entry("handler", 1000, "2026-02-16T10:00:00Z")];
         let functions = vec![make_lambda("handler", 1024)];
 
-        let x86_report = estimate_costs(&entries, &functions, Architecture::X86);
-        let arm_report = estimate_costs(&entries, &functions, Architecture::Arm);
+        let x86_report = estimate_costs(&entries, &functions, Architecture::X86_64);
+        let arm_report = estimate_costs(&entries, &functions, Architecture::Arm64);
 
         // ARM should be cheaper
         assert!(arm_report.total_cost < x86_report.total_cost);
@@ -528,7 +525,7 @@ mod tests {
             .map(|i| make_entry("handler", 100, &format!("2026-02-16T10:{:02}:00Z", i * 6)))
             .collect();
         let functions = vec![make_lambda("handler", 128)];
-        let report = estimate_costs(&entries, &functions, Architecture::X86);
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
 
         assert!(report.monthly_projection.is_some());
         let proj = report.monthly_projection.unwrap();
@@ -548,7 +545,7 @@ mod tests {
     fn test_json_output() {
         let entries = vec![make_entry("handler", 100, "2026-02-16T10:00:00Z")];
         let functions = vec![make_lambda("handler", 256)];
-        let report = estimate_costs(&entries, &functions, Architecture::X86);
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
         let json = format_report_json(&report);
 
         assert_eq!(json["total_invocations"], 1);

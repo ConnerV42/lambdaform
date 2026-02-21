@@ -6,6 +6,45 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Lambda function architecture
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Architecture {
+    #[default]
+    #[serde(rename = "x86_64")]
+    X86_64,
+    #[serde(rename = "arm64")]
+    Arm64,
+}
+
+impl std::fmt::Display for Architecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Architecture::X86_64 => write!(f, "x86_64"),
+            Architecture::Arm64 => write!(f, "arm64"),
+        }
+    }
+}
+
+impl std::str::FromStr for Architecture {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "arm64" | "arm" | "graviton" => Architecture::Arm64,
+            _ => Architecture::X86_64,
+        })
+    }
+}
+
+impl Architecture {
+    pub fn docker_platform(&self) -> &'static str {
+        match self {
+            Architecture::X86_64 => "linux/amd64",
+            Architecture::Arm64 => "linux/arm64",
+        }
+    }
+}
+
 /// Top-level configuration parsed from Terraform
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LambdaformConfig {
@@ -242,6 +281,10 @@ pub struct LambdaConfig {
     /// Lambda layer references (resource names of aws_lambda_layer_version)
     #[serde(default)]
     pub layers: Vec<String>,
+
+    /// Architecture (x86_64 or arm64)
+    #[serde(default)]
+    pub architecture: Architecture,
 }
 
 /// Lambda layer configuration
@@ -849,6 +892,7 @@ mod tests {
             timeout: 3,
             memory_size: 128,
             layers: vec![],
+            architecture: crate::config::Architecture::default(),
         };
 
         let resolved = config.resolve_source_dir(tmp.path());
@@ -875,6 +919,7 @@ mod tests {
             timeout: 3,
             memory_size: 128,
             layers: vec![],
+            architecture: crate::config::Architecture::default(),
         };
 
         let resolved = config.resolve_source_dir(tmp.path());

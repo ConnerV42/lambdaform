@@ -311,6 +311,7 @@ environment:
                 timeout: 3,
                 memory_size: 128,
                 layers: vec![],
+                architecture: crate::config::Architecture::default(),
             }],
             gateways: vec![],
             layers: vec![],

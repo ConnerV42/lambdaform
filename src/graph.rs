@@ -520,6 +520,7 @@ mod tests {
                     timeout: 30,
                     memory_size: 256,
                     layers: vec!["shared_utils".to_string()],
+                    architecture: crate::config::Architecture::default(),
                 },
                 LambdaConfig {
                     resource_name: "worker".to_string(),
@@ -532,6 +533,7 @@ mod tests {
                     timeout: 900,
                     memory_size: 512,
                     layers: vec![],
+                    architecture: crate::config::Architecture::default(),
                 },
             ],
             gateways: vec![ApiGatewayConfig {

@@ -1041,6 +1041,7 @@ except Exception as e:
             let mut stream = docker.create_image(
                 Some(CreateImageOptions {
                     from_image: image.clone(),
+                    platform: self.config.architecture.docker_platform().to_string(),
                     ..Default::default()
                 }),
                 None,
@@ -1094,7 +1095,7 @@ except Exception as e:
             .create_container(
                 Some(CreateContainerOptions {
                     name: container_name.as_str(),
-                    platform: None,
+                    platform: Some(self.config.architecture.docker_platform()),
                 }),
                 ContainerConfig {
                     image: Some(image.clone()),
@@ -1885,6 +1886,7 @@ mod tests {
             timeout: 1,
             memory_size: 128,
             layers: Vec::new(),
+            architecture: crate::config::Architecture::default(),
         };
         let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
         let event = LambdaEvent {
@@ -1940,6 +1942,7 @@ mod tests {
             timeout: 30,
             memory_size: 128,
             layers: Vec::new(),
+            architecture: crate::config::Architecture::default(),
         };
         let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
         assert_eq!(
@@ -1963,6 +1966,7 @@ mod tests {
             timeout: 30,
             memory_size: 128,
             layers: Vec::new(),
+            architecture: crate::config::Architecture::default(),
         };
         let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
         assert_eq!(executor.detect_custom_runtime_type(), CustomRuntimeType::Go);
@@ -1983,6 +1987,7 @@ mod tests {
             timeout: 30,
             memory_size: 128,
             layers: Vec::new(),
+            architecture: crate::config::Architecture::default(),
         };
         let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
         assert_eq!(
@@ -2012,6 +2017,7 @@ mod tests {
             timeout: 30,
             memory_size: 128,
             layers: Vec::new(),
+            architecture: crate::config::Architecture::default(),
         };
         let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
         assert_eq!(

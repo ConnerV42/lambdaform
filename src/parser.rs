@@ -1751,6 +1751,12 @@ fn parse_lambda_function(
         .filter_map(|ref_str| extract_layer_resource_name(&ref_str))
         .collect();
 
+    // Extract architecture from architectures list (defaults to x86_64)
+    let architecture = get_list_string_attrs(body, "architectures")
+        .first()
+        .map(|s| s.parse::<crate::config::Architecture>().unwrap())
+        .unwrap_or_default();
+
     Ok(Some(LambdaConfig {
         resource_name: name.to_string(),
         function_name,
@@ -1761,6 +1767,7 @@ fn parse_lambda_function(
         environment,
         timeout,
         memory_size,
+        architecture,
         layers,
     }))
 }
