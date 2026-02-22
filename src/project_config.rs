@@ -330,4 +330,94 @@ environment:
             "local"
         );
     }
+
+    #[test]
+    fn test_parse_empty_config() {
+        let yaml = "{}";
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.port, None);
+        assert_eq!(config.watch, None);
+        assert!(config.environment.is_empty());
+        assert!(config.functions.is_empty());
+        assert!(config.gateways.is_empty());
+        assert!(config.plugins.is_empty());
+    }
+
+    #[test]
+    fn test_debug_config_defaults() {
+        let yaml = "debug:\n  nodejs: true\n";
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let debug = config.debug.unwrap();
+        assert!(debug.nodejs);
+        assert!(!debug.python);
+        assert_eq!(debug.port, 9229);
+        assert_eq!(debug.python_port, 5678);
+        assert!(debug.break_on_start);
+    }
+
+    #[test]
+    fn test_debug_config_custom_ports() {
+        let yaml = "debug:\n  nodejs: true\n  port: 9999\n  python: true\n  python_port: 6789\n  break_on_start: false\n";
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let debug = config.debug.unwrap();
+        assert_eq!(debug.port, 9999);
+        assert_eq!(debug.python_port, 6789);
+        assert!(!debug.break_on_start);
+    }
+
+    #[test]
+    fn test_gateway_override() {
+        let yaml = "gateways:\n  my_api:\n    port: 9000\n";
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let gw = config.gateways.get("my_api").unwrap();
+        assert_eq!(gw.port, Some(9000));
+    }
+
+    #[test]
+    fn test_cors_config() {
+        let yaml = r#"
+cors:
+  allow_origins:
+    - "http://localhost:3000"
+    - "https://example.com"
+  max_age: 7200
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let cors = config.cors.unwrap();
+        assert_eq!(cors.allow_origins.len(), 2);
+        assert_eq!(cors.allow_origins[0], "http://localhost:3000");
+        assert_eq!(cors.max_age, Some(7200));
+    }
+
+    #[test]
+    fn test_function_override_all_fields() {
+        let yaml = r#"
+functions:
+  my_fn:
+    handler: new.handler
+    source_path: ./override/path
+    timeout: 60
+    memory_size: 512
+    environment:
+      KEY: value
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let f = config.functions.get("my_fn").unwrap();
+        assert_eq!(f.handler.as_deref(), Some("new.handler"));
+        assert_eq!(f.timeout, Some(60));
+        assert_eq!(f.memory_size, Some(512));
+        assert_eq!(f.environment.get("KEY").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_plugins_config() {
+        let yaml = r#"
+plugins:
+  - name: s3-local
+    path: ./plugins/s3-local
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.plugins.len(), 1);
+        assert_eq!(config.plugins[0].name, "s3-local");
+    }
 }
