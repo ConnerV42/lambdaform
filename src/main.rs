@@ -8,7 +8,7 @@ use walkdir::WalkDir;
 
 use bollard::Docker;
 use lambdaform::config;
-use lambdaform::graph;
+use lambdaform::graph::{self, NodeKind};
 use lambdaform::parser;
 use lambdaform::project_config;
 use lambdaform::runtime;
@@ -262,6 +262,10 @@ enum Commands {
         /// Additional .tfvars files to load
         #[arg(long = "var-file", value_name = "FILE")]
         var_files: Vec<PathBuf>,
+
+        /// Show port assignments (simulates server port allocation from this base port)
+        #[arg(short, long)]
+        port: Option<u16>,
     },
 }
 
@@ -374,7 +378,8 @@ fn main() -> anyhow::Result<()> {
             dir,
             format,
             var_files,
-        } => cmd_graph(dir, format, var_files),
+            port,
+        } => cmd_graph(dir, format, var_files, port),
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,
@@ -2130,14 +2135,58 @@ fn apply_plugin_side_effects(
     }
 }
 
-fn cmd_graph(dir: PathBuf, format: String, var_files: Vec<PathBuf>) -> anyhow::Result<()> {
+fn cmd_graph(
+    dir: PathBuf,
+    format: String,
+    var_files: Vec<PathBuf>,
+    port: Option<u16>,
+) -> anyhow::Result<()> {
     let config = if var_files.is_empty() {
         parser::parse_terraform_dir(&dir)?
     } else {
         parser::parse_terraform_dir_with_var_files(&dir, &var_files)?
     };
 
-    let (nodes, edges) = graph::build_graph(&config);
+    let (mut nodes, edges) = graph::build_graph(&config);
+
+    // If --port is given, annotate API Gateway and Function URL nodes with port assignments
+    if let Some(base_port) = port {
+        let mut gw_index: u16 = 0;
+        let gw_count = config.gateways.len() as u16;
+        for node in &mut nodes {
+            if node.kind == NodeKind::ApiGateway {
+                let p = if gw_count <= 1 {
+                    base_port
+                } else {
+                    base_port + gw_index
+                };
+                node.details.push(format!("port: {p}"));
+                gw_index += 1;
+            }
+        }
+        // Function URLs get ports after gateways
+        let furl_base = if gw_count > 1 {
+            base_port + gw_count
+        } else {
+            base_port + 1
+        };
+        let mut furl_index: u16 = 0;
+        for node in &mut nodes {
+            if node.id.starts_with("lambda_") {
+                // Check if this lambda has a function URL
+                let res_name = node.id.strip_prefix("lambda_").unwrap_or("");
+                if config
+                    .function_urls
+                    .iter()
+                    .any(|fu| fu.function_resource == res_name)
+                {
+                    let p = furl_base + furl_index;
+                    node.details.push(format!("function URL port: {p}"));
+                    furl_index += 1;
+                }
+            }
+        }
+    }
 
     if nodes.is_empty() {
         println!("No infrastructure resources found in {}", dir.display());
