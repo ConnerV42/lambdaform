@@ -327,4 +327,63 @@ mod tests {
         let event = build_sns_event("t", &msgs);
         assert_eq!(event["Records"].as_array().unwrap().len(), 2);
     }
+
+    #[test]
+    fn test_md5_hash_known_value() {
+        // MD5 of "hello" is well-known
+        assert_eq!(md5_hash("hello"), "5d41402abc4b2a76b9719d911017c592");
+    }
+
+    #[test]
+    fn test_md5_hash_empty() {
+        assert_eq!(md5_hash(""), "d41d8cd98f00b204e9800998ecf8427e");
+    }
+
+    #[test]
+    fn test_timestamp_ms_is_numeric() {
+        let ts = timestamp_ms();
+        assert!(ts.parse::<u128>().is_ok(), "timestamp_ms should be numeric");
+        assert!(ts.len() >= 13, "should be millisecond precision");
+    }
+
+    #[test]
+    fn test_chrono_timestamp_format() {
+        let ts = chrono_timestamp();
+        // Should match YYYY-MM-DDTHH:MM:SS.000Z
+        assert!(ts.ends_with(".000Z"), "should end with .000Z: {}", ts);
+        assert_eq!(
+            ts.len(),
+            24,
+            "ISO 8601 with millis should be 24 chars: {}",
+            ts
+        );
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], "T");
+    }
+
+    #[test]
+    fn test_sqs_event_has_md5_of_body() {
+        let event = build_sqs_event("q", &["test body".to_string()], false);
+        let md5 = event["Records"][0]["md5OfBody"].as_str().unwrap();
+        assert_eq!(md5, md5_hash("test body"));
+    }
+
+    #[test]
+    fn test_sqs_event_arn_format() {
+        let event = build_sqs_event("my-queue", &["x".to_string()], false);
+        let arn = event["Records"][0]["eventSourceARN"].as_str().unwrap();
+        assert!(arn.starts_with("arn:aws:sqs:"));
+        assert!(arn.ends_with("my-queue"));
+    }
+
+    #[test]
+    fn test_sns_event_structure() {
+        let event = build_sns_event("alerts", &["alert!".to_string()]);
+        let record = &event["Records"][0];
+        assert_eq!(record["EventVersion"], "1.0");
+        assert!(record["Sns"]["MessageId"].is_string());
+        assert!(record["Sns"]["Timestamp"].is_string());
+        assert_eq!(record["Sns"]["Type"], "Notification");
+    }
 }
