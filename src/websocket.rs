@@ -613,4 +613,160 @@ mod tests {
 
         assert_eq!(state.resolve_route_key("not json"), None);
     }
+
+    fn make_ws_state() -> WsState {
+        WsState {
+            config: RwLock::new(crate::config::LambdaformConfig::default()),
+            source_dir: std::path::PathBuf::from("."),
+            debug: None,
+            pool: Arc::new(ProcessPool::new()),
+            routes: RwLock::new(HashMap::new()),
+            connections: Mutex::new(HashMap::new()),
+            route_selection_expression: "$request.body.action".to_string(),
+            gateway_resource: "test_gw".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_route_key_numeric_value() {
+        let state = make_ws_state();
+        // Numeric values aren't strings, should return None
+        assert_eq!(state.resolve_route_key(r#"{"action": 42}"#), None);
+    }
+
+    #[test]
+    fn test_resolve_route_key_nested_expression() {
+        let state = WsState {
+            route_selection_expression: "$request.body.type".to_string(),
+            ..make_ws_state()
+        };
+        assert_eq!(
+            state.resolve_route_key(r#"{"type": "subscribe", "channel": "updates"}"#),
+            Some("subscribe".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_route_key_empty_body() {
+        let state = make_ws_state();
+        assert_eq!(state.resolve_route_key(""), None);
+        assert_eq!(state.resolve_route_key("{}"), None);
+    }
+
+    #[test]
+    fn test_resolve_route_key_non_body_expression() {
+        let state = WsState {
+            route_selection_expression: "$request.header.x-action".to_string(),
+            ..make_ws_state()
+        };
+        // Non $request.body expressions return None (unsupported)
+        assert_eq!(state.resolve_route_key(r#"{"action": "test"}"#), None);
+    }
+
+    #[test]
+    fn test_build_routes_from_config() {
+        use crate::config::*;
+        let config = LambdaformConfig {
+            gateways: vec![ApiGatewayConfig {
+                resource_name: "ws_gw".to_string(),
+                name: "ws-api".to_string(),
+                api_type: ApiType::WebSocket,
+                routes: vec![
+                    RouteConfig {
+                        method: HttpMethod::Any,
+                        path: "$connect".to_string(),
+                        function_resource: "connect_fn".to_string(),
+                        authorizer: None,
+                    },
+                    RouteConfig {
+                        method: HttpMethod::Any,
+                        path: "$disconnect".to_string(),
+                        function_resource: "disconnect_fn".to_string(),
+                        authorizer: None,
+                    },
+                    RouteConfig {
+                        method: HttpMethod::Any,
+                        path: "$default".to_string(),
+                        function_resource: "default_fn".to_string(),
+                        authorizer: None,
+                    },
+                    RouteConfig {
+                        method: HttpMethod::Any,
+                        path: "sendmessage".to_string(),
+                        function_resource: "send_fn".to_string(),
+                        authorizer: None,
+                    },
+                ],
+                route_selection_expression: Some("$request.body.action".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let routes = WsState::build_routes(&config, "ws_gw");
+        assert_eq!(routes.len(), 4);
+        assert_eq!(routes["$connect"].function_resource, "connect_fn");
+        assert_eq!(routes["$disconnect"].function_resource, "disconnect_fn");
+        assert_eq!(routes["$default"].function_resource, "default_fn");
+        assert_eq!(routes["sendmessage"].function_resource, "send_fn");
+    }
+
+    #[test]
+    fn test_build_routes_wrong_gateway() {
+        let routes =
+            WsState::build_routes(&crate::config::LambdaformConfig::default(), "nonexistent");
+        assert!(routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_post_to_connection_missing() {
+        let state = make_ws_state();
+        assert!(!state.post_to_connection("nonexistent-id", "hello").await);
+    }
+
+    #[tokio::test]
+    async fn test_post_to_connection_exists() {
+        let state = make_ws_state();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut conns = state.connections.lock().await;
+            conns.insert("conn-1".to_string(), tx);
+        }
+        assert!(state.post_to_connection("conn-1", "hello world").await);
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, Message::Text("hello world".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_find_function_exists() {
+        use crate::config::*;
+        let config = LambdaformConfig {
+            functions: vec![LambdaConfig {
+                resource_name: "my_fn".to_string(),
+                function_name: "my-function".to_string(),
+                handler: "index.handler".to_string(),
+                runtime: Runtime::Nodejs20,
+                source_path: None,
+                filename_ref: None,
+                environment: HashMap::new(),
+                timeout: 30,
+                memory_size: 128,
+                layers: vec![],
+                architecture: Architecture::default(),
+            }],
+            ..Default::default()
+        };
+        let state = WsState {
+            config: RwLock::new(config),
+            ..make_ws_state()
+        };
+        let found = state.find_function("my_fn").await;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().function_name, "my-function");
+    }
+
+    #[tokio::test]
+    async fn test_find_function_missing() {
+        let state = make_ws_state();
+        assert!(state.find_function("nonexistent").await.is_none());
+    }
 }
