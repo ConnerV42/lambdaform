@@ -257,4 +257,161 @@ mod tests {
         let m = matched.unwrap();
         assert_eq!(m.path_params.get("id"), Some(&"123".to_string()));
     }
+
+    fn make_gateway(routes: Vec<RouteConfig>) -> ApiGatewayConfig {
+        ApiGatewayConfig {
+            resource_name: "api".to_string(),
+            name: "test-api".to_string(),
+            api_type: ApiType::Rest,
+            routes,
+            route_selection_expression: None,
+        }
+    }
+
+    #[test]
+    fn test_method_mismatch_returns_none() {
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Post,
+            "/items",
+            "create_item",
+        )]);
+        let funcs = vec![make_test_lambda("create_item")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router.match_request(&HttpMethod::Get, "/items").is_none());
+    }
+
+    #[test]
+    fn test_any_method_matches_all() {
+        let gw = make_gateway(vec![make_test_route(HttpMethod::Any, "/proxy", "proxy_fn")]);
+        let funcs = vec![make_test_lambda("proxy_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router.match_request(&HttpMethod::Get, "/proxy").is_some());
+        assert!(router.match_request(&HttpMethod::Post, "/proxy").is_some());
+        assert!(router
+            .match_request(&HttpMethod::Delete, "/proxy")
+            .is_some());
+    }
+
+    #[test]
+    fn test_proxy_plus_catch_all() {
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Any,
+            "/api/{proxy+}",
+            "catch_all",
+        )]);
+        let funcs = vec![make_test_lambda("catch_all")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router.match_request(&HttpMethod::Get, "/api/foo/bar/baz");
+        assert!(m.is_some());
+        let m = m.unwrap();
+        assert_eq!(m.path_params.get("proxy"), Some(&"foo/bar/baz".to_string()));
+    }
+
+    #[test]
+    fn test_multiple_path_params() {
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/users/{userId}/posts/{postId}",
+            "get_post",
+        )]);
+        let funcs = vec![make_test_lambda("get_post")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router.match_request(&HttpMethod::Get, "/users/42/posts/99");
+        assert!(m.is_some());
+        let m = m.unwrap();
+        assert_eq!(m.path_params.get("userId"), Some(&"42".to_string()));
+        assert_eq!(m.path_params.get("postId"), Some(&"99".to_string()));
+    }
+
+    #[test]
+    fn test_no_match_wrong_path() {
+        let gw = make_gateway(vec![make_test_route(HttpMethod::Get, "/users", "list_fn")]);
+        let funcs = vec![make_test_lambda("list_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router.match_request(&HttpMethod::Get, "/posts").is_none());
+        assert!(router
+            .match_request(&HttpMethod::Get, "/users/extra")
+            .is_none());
+    }
+
+    #[test]
+    fn test_first_matching_route_wins() {
+        let gw = make_gateway(vec![
+            make_test_route(HttpMethod::Get, "/items/{id}", "specific"),
+            make_test_route(HttpMethod::Get, "/items/{proxy+}", "catch_all"),
+        ]);
+        let funcs = vec![make_test_lambda("specific"), make_test_lambda("catch_all")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router
+            .match_request(&HttpMethod::Get, "/items/123")
+            .unwrap();
+        assert_eq!(m.function.resource_name, "specific");
+    }
+
+    #[test]
+    fn test_resource_path_is_template() {
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/orders/{orderId}",
+            "get_order",
+        )]);
+        let funcs = vec![make_test_lambda("get_order")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router
+            .match_request(&HttpMethod::Get, "/orders/abc")
+            .unwrap();
+        assert_eq!(m.resource_path, Some("/orders/{orderId}".to_string()));
+    }
+
+    #[test]
+    fn test_api_type_propagated() {
+        let gw = ApiGatewayConfig {
+            resource_name: "http_api".to_string(),
+            name: "http-api".to_string(),
+            api_type: ApiType::Http,
+            routes: vec![make_test_route(HttpMethod::Get, "/v2", "v2_fn")],
+            route_selection_expression: None,
+        };
+        let funcs = vec![make_test_lambda("v2_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router.match_request(&HttpMethod::Get, "/v2").unwrap();
+        assert_eq!(m.api_type, ApiType::Http);
+    }
+
+    #[test]
+    fn test_authorizer_attached() {
+        let route = RouteConfig {
+            method: HttpMethod::Get,
+            path: "/secure".to_string(),
+            function_resource: "handler".to_string(),
+            authorizer: Some(AuthorizerConfig {
+                auth_type: AuthorizerType::Lambda,
+                function_resource: Some("auth_fn".to_string()),
+            }),
+        };
+        let gw = make_gateway(vec![route]);
+        let funcs = vec![make_test_lambda("handler"), make_test_lambda("auth_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router.match_request(&HttpMethod::Get, "/secure").unwrap();
+        assert!(m.authorizer_function.is_some());
+        assert_eq!(m.authorizer_function.unwrap().resource_name, "auth_fn");
+    }
+
+    #[test]
+    fn test_for_gateway_constructor() {
+        let gw = make_gateway(vec![make_test_route(HttpMethod::Get, "/test", "fn1")]);
+        let funcs = vec![make_test_lambda("fn1")];
+        let router = Router::for_gateway(&gw, &funcs);
+
+        assert!(router.match_request(&HttpMethod::Get, "/test").is_some());
+    }
 }
