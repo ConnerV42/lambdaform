@@ -243,4 +243,99 @@ mod tests {
         assert!(formatted.contains("201"));
         assert!(formatted.contains("150ms"));
     }
+
+    fn make_entry(status: u16) -> HistoryEntry {
+        HistoryEntry {
+            id: "t".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            query: None,
+            headers: None,
+            body: None,
+            function: "fn".to_string(),
+            status,
+            response_body: None,
+            duration_ms: 10,
+            port: 3000,
+        }
+    }
+
+    #[test]
+    fn test_format_entry_status_icons() {
+        assert!(format_entry(&make_entry(200), 0).contains("✅"));
+        assert!(format_entry(&make_entry(301), 0).contains("↪️"));
+        assert!(format_entry(&make_entry(404), 0).contains("⚠️"));
+        assert!(format_entry(&make_entry(500), 0).contains("❌"));
+    }
+
+    #[test]
+    fn test_format_entry_no_query() {
+        let formatted = format_entry(&make_entry(200), 5);
+        assert!(formatted.contains("[5]"));
+        assert!(!formatted.contains("?"));
+    }
+
+    #[test]
+    fn test_load_history_skips_malformed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bad.jsonl");
+        let good = serde_json::to_string(&make_entry(200)).unwrap();
+        std::fs::write(&path, format!("{}\nnot json\n{}\n", good, good)).unwrap();
+        let entries = load_history(&path).unwrap();
+        assert_eq!(entries.len(), 2); // skips the bad line
+    }
+
+    #[test]
+    fn test_load_history_missing_file() {
+        let result = load_history(Path::new("/nonexistent/history.jsonl"));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rotation_on_startup() {
+        let dir = TempDir::new().unwrap();
+        let lf_dir = dir.path().join(".lambdaform");
+        std::fs::create_dir_all(&lf_dir).unwrap();
+        let path = lf_dir.join("history.jsonl");
+
+        // Write 1050 lines (over MAX_ENTRIES of 1000)
+        let entry = make_entry(200);
+        let line = serde_json::to_string(&entry).unwrap();
+        let content: String = (0..1050).map(|_| format!("{}\n", line)).collect();
+        std::fs::write(&path, &content).unwrap();
+
+        // Creating recorder triggers rotation
+        let _recorder = HistoryRecorder::new(dir.path()).unwrap();
+
+        let loaded = load_history(&path).unwrap();
+        assert_eq!(loaded.len(), 1000);
+    }
+
+    #[test]
+    fn test_entry_serialization_roundtrip() {
+        let entry = HistoryEntry {
+            id: "rt-1".to_string(),
+            timestamp: "2026-02-22T00:00:00Z".to_string(),
+            method: "PUT".to_string(),
+            path: "/items/42".to_string(),
+            query: Some(HashMap::from([("v".to_string(), "2".to_string())])),
+            headers: Some(HashMap::from([(
+                "content-type".to_string(),
+                "application/json".to_string(),
+            )])),
+            body: Some("{\"name\":\"updated\"}".to_string()),
+            function: "update_fn".to_string(),
+            status: 204,
+            response_body: None,
+            duration_ms: 88,
+            port: 4000,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "rt-1");
+        assert_eq!(deserialized.method, "PUT");
+        assert_eq!(deserialized.status, 204);
+        assert_eq!(deserialized.query.unwrap().get("v").unwrap(), "2");
+    }
 }
