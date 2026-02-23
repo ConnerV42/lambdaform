@@ -134,6 +134,30 @@ lambdaform trigger sqs my_queue '{"key":"value"}' --function my_handler
 cargo install lambdaform --features tui
 lambdaform start --tui                     # live dashboard with request log
 
+# Project setup wizard
+lambdaform init                            # detect project, generate config
+lambdaform init --yes                      # non-interactive with defaults
+
+# Request history & replay
+lambdaform replay                          # list recent requests
+lambdaform replay --last 5                 # last 5 requests
+lambdaform replay --index 3                # replay request #3
+lambdaform replay --method POST            # filter by method
+lambdaform replay --json                   # JSON output
+
+# Cost estimation
+lambdaform cost                            # estimate from request history
+lambdaform cost --json                     # machine-readable output
+
+# Infrastructure graph
+lambdaform graph                           # ASCII graph to terminal
+lambdaform graph --format dot              # Graphviz DOT output
+lambdaform graph --format json             # JSON for tooling
+lambdaform graph --port 3000               # show port assignments
+
+# Plugin management
+lambdaform plugins                         # list active plugins
+
 # Shell completions
 lambdaform completions bash > ~/.bash_completion.d/lambdaform
 lambdaform completions zsh > ~/.zfunc/_lambdaform
