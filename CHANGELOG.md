@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.2 — Polish & Test Coverage (2026-02-22)
+
+**Features:**
+- `lambdaform graph --port <PORT>` — show port assignments in infrastructure graph
+
+**Documentation:**
+- Added 5 missing CLI commands to README (init, replay, cost, graph, plugins)
+- All 13 subcommands now documented with usage examples
+
+**Test coverage:**
+- 40 new tests across 5 modules (router, websocket, trigger, history, project_config)
+- Total tests: 204 (up from 164)
+
 ## v1.0.1 — Pre-Launch QA (2026-02-20)
 
 Comprehensive QA sprint: 37 issues identified, 33 fixed, 4 deferred to post-launch.
