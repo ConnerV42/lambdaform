@@ -760,3 +760,52 @@ fn test_function_url_server_builds() {
         config.function_urls[0].cors.as_ref(),
     );
 }
+
+// ─── Multiple HTTP Methods on Same Resource ─────────────────────────────────
+
+#[tokio::test]
+async fn test_multi_method_same_resource() {
+    // Regression test for bug where only the first method on a resource was registered
+    // Fixed by matching integrations to methods using http_method_ref instead of resource_ref
+    let app = build_test_app("multi-method");
+
+    // Test GET /items
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/items").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["method"], "GET");
+
+    // Test POST /items
+    let resp = app
+        .clone()
+        .oneshot(Request::post("/items").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["method"], "POST");
+
+    // Test PUT /items
+    let resp = app
+        .clone()
+        .oneshot(Request::put("/items").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["method"], "PUT");
+
+    // Test DELETE /items
+    let resp = app
+        .clone()
+        .oneshot(Request::delete("/items").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["method"], "DELETE");
+}

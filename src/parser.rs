@@ -1384,10 +1384,13 @@ fn resolve_api_gateway_routes(
             None => continue,
         };
 
-        // Find the method for this resource
+        // Find the method for this integration using http_method_ref
+        // This correctly matches integrations to methods even when multiple methods
+        // exist for the same resource (e.g., GET, POST, PUT, DELETE on /items)
+        let method_resource_name = extract_resource_name_from_ref(&integration.http_method_ref);
         let method = methods
             .iter()
-            .find(|m| extract_resource_name_from_ref(&m.resource_ref) == apigw_resource_name);
+            .find(|m| m.resource_name == method_resource_name);
 
         let http_method = match &method {
             Some(m) => parse_http_method(&m.http_method),
