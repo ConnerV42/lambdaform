@@ -1,0 +1,11 @@
+functions:
+  user_service:
+    source_path: .
+  order_service:
+    source_path: .
+  notification_service:
+    source_path: .
+
+layers:
+  common_utils:
+    source_path: ./layers/common-utils
