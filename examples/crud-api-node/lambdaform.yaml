@@ -1,0 +1,3 @@
+functions:
+  crud_api:
+    source_path: .
