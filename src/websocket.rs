@@ -769,4 +769,147 @@ mod tests {
         let state = make_ws_state();
         assert!(state.find_function("nonexistent").await.is_none());
     }
+
+    #[test]
+    fn test_base64_encode_basic() {
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"\x00\x01\x02"), "AAEC");
+    }
+
+    #[test]
+    fn test_base64_encode_binary() {
+        // All byte values 0-255
+        let data: Vec<u8> = (0..=255).collect();
+        let encoded = base64_encode(&data);
+        // Should be valid base64 — decodable back
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_websocket_event_serialization_connect() {
+        let event = WebSocketEvent {
+            request_context: WebSocketRequestContext {
+                route_key: "$connect".to_string(),
+                event_type: "CONNECT".to_string(),
+                connection_id: "abc123".to_string(),
+                stage: "local".to_string(),
+                api_id: "lambdaform".to_string(),
+                request_id: "ws-req-1".to_string(),
+                domain_name: "localhost".to_string(),
+                request_time_epoch: 1700000000000,
+                message_id: None,
+                identity: RequestIdentity {
+                    source_ip: "127.0.0.1".to_string(),
+                },
+                connected_at: Some(1700000000000),
+            },
+            body: None,
+            is_base64_encoded: false,
+            headers: Some(HashMap::new()),
+            multi_value_headers: None,
+            query_string_parameters: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["requestContext"]["routeKey"], "$connect");
+        assert_eq!(json["requestContext"]["eventType"], "CONNECT");
+        assert_eq!(json["requestContext"]["connectionId"], "abc123");
+        assert!(json["body"].is_null());
+        assert!(json["headers"].is_object());
+        assert!(json["requestContext"]["messageId"].is_null());
+    }
+
+    #[test]
+    fn test_websocket_event_serialization_message() {
+        let event = WebSocketEvent {
+            request_context: WebSocketRequestContext {
+                route_key: "sendmessage".to_string(),
+                event_type: "MESSAGE".to_string(),
+                connection_id: "conn-xyz".to_string(),
+                stage: "local".to_string(),
+                api_id: "lambdaform".to_string(),
+                request_id: "ws-req-2".to_string(),
+                domain_name: "localhost".to_string(),
+                request_time_epoch: 1700000001000,
+                message_id: Some("msg-001".to_string()),
+                identity: RequestIdentity {
+                    source_ip: "192.168.1.1".to_string(),
+                },
+                connected_at: Some(1700000000000),
+            },
+            body: Some(r#"{"action":"sendmessage","data":"hi"}"#.to_string()),
+            is_base64_encoded: false,
+            headers: None,
+            multi_value_headers: None,
+            query_string_parameters: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["requestContext"]["routeKey"], "sendmessage");
+        assert_eq!(json["requestContext"]["messageId"], "msg-001");
+        assert!(json["body"].is_string());
+        assert!(json["headers"].is_null());
+    }
+
+    #[test]
+    fn test_build_routes_multiple_custom_routes() {
+        use crate::config::*;
+        let config = LambdaformConfig {
+            gateways: vec![ApiGatewayConfig {
+                resource_name: "ws_gw".to_string(),
+                name: "ws-api".to_string(),
+                api_type: ApiType::WebSocket,
+                routes: vec![
+                    RouteConfig {
+                        method: HttpMethod::Any,
+                        path: "join".to_string(),
+                        function_resource: "join_fn".to_string(),
+                        authorizer: None,
+                    },
+                    RouteConfig {
+                        method: HttpMethod::Any,
+                        path: "leave".to_string(),
+                        function_resource: "leave_fn".to_string(),
+                        authorizer: None,
+                    },
+                ],
+                route_selection_expression: Some("$request.body.action".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let routes = WsState::build_routes(&config, "ws_gw");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes["join"].function_resource, "join_fn");
+        assert_eq!(routes["leave"].function_resource, "leave_fn");
+    }
+
+    #[tokio::test]
+    async fn test_post_to_connection_dropped_receiver() {
+        let state = make_ws_state();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut conns = state.connections.lock().await;
+            conns.insert("conn-drop".to_string(), tx);
+        }
+        // Drop receiver — send should fail and return false
+        drop(rx);
+        assert!(!state.post_to_connection("conn-drop", "hello").await);
+    }
+
+    #[tokio::test]
+    async fn test_connections_insert_and_remove() {
+        let state = make_ws_state();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut conns = state.connections.lock().await;
+            conns.insert("c1".to_string(), tx);
+            assert_eq!(conns.len(), 1);
+            conns.remove("c1");
+            assert_eq!(conns.len(), 0);
+        }
+    }
 }

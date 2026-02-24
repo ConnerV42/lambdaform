@@ -2083,4 +2083,136 @@ mod tests {
         let future_time = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         assert!(!check_dir_newer(&src, future_time));
     }
+
+    #[test]
+    fn test_check_dir_newer_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        // Empty dir — no files newer
+        assert!(!check_dir_newer(&empty, old_time));
+    }
+
+    #[test]
+    fn test_check_dir_newer_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing");
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        assert!(!check_dir_newer(&missing, old_time));
+    }
+
+    #[test]
+    fn test_lambda_response_base64_encoded() {
+        let json = r#"{"statusCode": 200, "body": "aGVsbG8=", "isBase64Encoded": true}"#;
+        let resp: LambdaResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert!(resp.is_base64_encoded);
+        assert_eq!(resp.body.unwrap(), "aGVsbG8=");
+    }
+
+    #[test]
+    fn test_lambda_response_with_multi_value_headers() {
+        let json = r#"{
+            "statusCode": 200,
+            "headers": {"content-type": "application/json"},
+            "multiValueHeaders": {"set-cookie": ["a=1", "b=2"]}
+        }"#;
+        let resp: LambdaResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert!(resp.headers.is_some());
+    }
+
+    #[test]
+    fn test_lambda_event_with_body() {
+        let event = LambdaEvent {
+            http_method: "POST".to_string(),
+            path: "/items".to_string(),
+            resource: "/items".to_string(),
+            path_parameters: Some(HashMap::new()),
+            query_string_parameters: None,
+            multi_value_query_string_parameters: None,
+            headers: Some(HashMap::from([(
+                "content-type".to_string(),
+                "application/json".to_string(),
+            )])),
+            multi_value_headers: None,
+            body: Some(r#"{"name":"test"}"#.to_string()),
+            is_base64_encoded: false,
+            request_context: RequestContext {
+                stage: "local".to_string(),
+                resource_path: "/items".to_string(),
+                http_method: "POST".to_string(),
+                request_id: "req-123".to_string(),
+                api_id: "lambdaform".to_string(),
+                path: "/items".to_string(),
+                identity: RequestIdentity {
+                    source_ip: "127.0.0.1".to_string(),
+                },
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["httpMethod"], "POST");
+        assert_eq!(json["body"], r#"{"name":"test"}"#);
+        assert!(!json["isBase64Encoded"].as_bool().unwrap());
+        assert!(json["pathParameters"].is_object());
+    }
+
+    #[test]
+    fn test_uuid_simple_uniqueness() {
+        let ids: Vec<String> = (0..100).map(|_| uuid_simple()).collect();
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        // All 100 should be unique
+        assert_eq!(unique.len(), 100);
+    }
+
+    #[test]
+    fn test_parse_handler_deeply_nested() {
+        let (file, func) = parse_handler("src/handlers/api/v2.handle_request").unwrap();
+        assert_eq!(file, "src/handlers/api/v2");
+        assert_eq!(func, "handle_request");
+    }
+
+    #[test]
+    fn test_find_handler_file_nested_path() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("src").join("handlers");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("api.js"), "// handler").unwrap();
+        let result = find_handler_file(dir.path(), "src/handlers/api", "js").unwrap();
+        assert!(result.exists());
+    }
+
+    #[test]
+    fn test_websocket_event_serialization_fields() {
+        let event = WebSocketEvent {
+            request_context: WebSocketRequestContext {
+                route_key: "$default".to_string(),
+                event_type: "MESSAGE".to_string(),
+                connection_id: "conn-1".to_string(),
+                stage: "local".to_string(),
+                api_id: "lambdaform".to_string(),
+                request_id: "req-1".to_string(),
+                domain_name: "localhost".to_string(),
+                request_time_epoch: 1700000000000,
+                message_id: Some("msg-1".to_string()),
+                identity: RequestIdentity {
+                    source_ip: "10.0.0.1".to_string(),
+                },
+                connected_at: Some(1699999999000),
+            },
+            body: Some("hello".to_string()),
+            is_base64_encoded: false,
+            headers: None,
+            multi_value_headers: None,
+            query_string_parameters: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        // Check camelCase field names
+        assert!(json.get("requestContext").is_some());
+        assert!(json.get("isBase64Encoded").is_some());
+        let rc = &json["requestContext"];
+        assert_eq!(rc["connectedAt"], 1699999999000u64);
+        assert_eq!(rc["requestTimeEpoch"], 1700000000000u64);
+    }
 }

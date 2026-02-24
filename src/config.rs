@@ -1013,4 +1013,190 @@ mod tests {
         let resolved = config.resolve_source_dir(tmp.path());
         assert_eq!(resolved, lambda_dir);
     }
+
+    #[test]
+    fn test_handler_filename_nodejs() {
+        let config = LambdaConfig {
+            resource_name: "f".to_string(),
+            function_name: "f".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+        assert_eq!(config.handler_filename(), "index.js");
+    }
+
+    #[test]
+    fn test_handler_filename_python() {
+        let config = LambdaConfig {
+            resource_name: "f".to_string(),
+            function_name: "f".to_string(),
+            handler: "app.lambda_handler".to_string(),
+            runtime: Runtime::Python312,
+            source_path: None,
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+        assert_eq!(config.handler_filename(), "app.py");
+    }
+
+    #[test]
+    fn test_handler_filename_go() {
+        let config = LambdaConfig {
+            resource_name: "f".to_string(),
+            function_name: "f".to_string(),
+            handler: "bootstrap".to_string(),
+            runtime: Runtime::Go1,
+            source_path: None,
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+        assert_eq!(config.handler_filename(), "bootstrap");
+    }
+
+    #[test]
+    fn test_handler_filename_custom_runtime() {
+        let config = LambdaConfig {
+            resource_name: "f".to_string(),
+            function_name: "f".to_string(),
+            handler: "bootstrap".to_string(),
+            runtime: Runtime::ProvidedAl2023,
+            source_path: None,
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+        assert_eq!(config.handler_filename(), "bootstrap");
+    }
+
+    #[test]
+    fn test_architecture_serde_roundtrip() {
+        let arch = Architecture::Arm64;
+        let json = serde_json::to_string(&arch).unwrap();
+        assert_eq!(json, "\"arm64\"");
+        let parsed: Architecture = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, Architecture::Arm64);
+    }
+
+    #[test]
+    fn test_architecture_docker_platform() {
+        assert_eq!(Architecture::X86_64.docker_platform(), "linux/amd64");
+        assert_eq!(Architecture::Arm64.docker_platform(), "linux/arm64");
+    }
+
+    #[test]
+    fn test_api_type_serde() {
+        let rest: ApiType = serde_json::from_str("\"Rest\"").unwrap();
+        assert_eq!(rest, ApiType::Rest);
+        let http: ApiType = serde_json::from_str("\"Http\"").unwrap();
+        assert_eq!(http, ApiType::Http);
+        let ws: ApiType = serde_json::from_str("\"WebSocket\"").unwrap();
+        assert_eq!(ws, ApiType::WebSocket);
+    }
+
+    #[test]
+    fn test_http_method_str() {
+        assert_eq!(
+            RouteConfig {
+                method: HttpMethod::Get,
+                path: "/".to_string(),
+                function_resource: "f".to_string(),
+                authorizer: None,
+            }
+            .method_str(),
+            "GET"
+        );
+        assert_eq!(
+            RouteConfig {
+                method: HttpMethod::Any,
+                path: "/".to_string(),
+                function_resource: "f".to_string(),
+                authorizer: None,
+            }
+            .method_str(),
+            "ANY"
+        );
+    }
+
+    #[test]
+    fn test_lambda_config_find_handler_in_common_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("index.js"), "exports.handler = () => {}").unwrap();
+
+        let config = LambdaConfig {
+            resource_name: "f".to_string(),
+            function_name: "f".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+
+        let found = config.find_handler_in_common_dirs(tmp.path());
+        assert!(found.is_some());
+        assert!(found.unwrap().ends_with("src"));
+    }
+
+    #[test]
+    fn test_lambda_config_find_handler_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let config = LambdaConfig {
+            resource_name: "f".to_string(),
+            function_name: "f".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+
+        assert!(config.find_handler_in_common_dirs(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn test_runtime_nodejs22_and_python313() {
+        assert_eq!(Runtime::from_str("nodejs22.x"), Runtime::Nodejs22);
+        assert_eq!(Runtime::from_str("python3.13"), Runtime::Python313);
+        assert!(Runtime::Nodejs22.is_nodejs());
+        assert!(Runtime::Python313.is_python());
+        assert_eq!(Runtime::Nodejs22.as_str(), "nodejs22.x");
+        assert_eq!(Runtime::Python313.as_str(), "python3.13");
+    }
+
+    #[test]
+    fn test_default_sqs_config_values() {
+        let json = r#"{"resource_name":"q","name":"test"}"#;
+        let sqs: SqsQueueConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(sqs.visibility_timeout, 30);
+        assert!(!sqs.fifo_queue);
+    }
 }
