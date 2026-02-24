@@ -1591,6 +1591,159 @@ mod tests {
         assert!(is_binary_content_type("application/zip"));
         assert!(is_binary_content_type("application/protobuf"));
     }
+
+    #[test]
+    fn test_build_function_url_cors_layer_wildcard_methods() {
+        let cors = crate::config::FunctionUrlCors {
+            allow_origins: vec!["https://example.com".to_string()],
+            allow_methods: vec!["*".to_string()],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            max_age: Some(86400),
+            allow_credentials: false,
+        };
+        let _layer = build_function_url_cors_layer(&cors);
+    }
+
+    #[test]
+    fn test_build_function_url_cors_layer_specific_methods() {
+        let cors = crate::config::FunctionUrlCors {
+            allow_origins: vec!["*".to_string()],
+            allow_methods: vec!["GET".to_string(), "POST".to_string(), "DELETE".to_string()],
+            allow_headers: vec!["Content-Type".to_string(), "Authorization".to_string()],
+            expose_headers: vec!["X-Request-Id".to_string()],
+            max_age: None,
+            allow_credentials: true,
+        };
+        let _layer = build_function_url_cors_layer(&cors);
+    }
+
+    #[test]
+    fn test_build_function_url_cors_layer_empty() {
+        let cors = crate::config::FunctionUrlCors {
+            allow_origins: vec![],
+            allow_methods: vec![],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            max_age: None,
+            allow_credentials: false,
+        };
+        let _layer = build_function_url_cors_layer(&cors);
+    }
+
+    #[test]
+    fn test_resolve_layer_paths_no_layers() {
+        let function = LambdaConfig {
+            resource_name: "test_fn".to_string(),
+            function_name: "test_fn".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: crate::config::Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: Default::default(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Default::default(),
+        };
+        let paths = resolve_layer_paths(&function, &[], std::path::Path::new("/tmp"));
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_layer_paths_missing_layer_ref() {
+        let function = LambdaConfig {
+            resource_name: "test_fn".to_string(),
+            function_name: "test_fn".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: crate::config::Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: Default::default(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec!["nonexistent_layer".to_string()],
+            architecture: Default::default(),
+        };
+        let paths = resolve_layer_paths(&function, &[], std::path::Path::new("/tmp"));
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_layer_paths_no_source_path() {
+        let function = LambdaConfig {
+            resource_name: "test_fn".to_string(),
+            function_name: "test_fn".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: crate::config::Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: Default::default(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec!["my_layer".to_string()],
+            architecture: Default::default(),
+        };
+        let layers = vec![crate::config::LayerConfig {
+            resource_name: "my_layer".to_string(),
+            layer_name: "my_layer".to_string(),
+            source_path: None,
+            compatible_runtimes: vec![],
+        }];
+        let paths = resolve_layer_paths(&function, &layers, std::path::Path::new("/tmp"));
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_layer_paths_existing_dir() {
+        let dir = std::env::temp_dir().join("lambdaform_test_layer_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let function = LambdaConfig {
+            resource_name: "test_fn".to_string(),
+            function_name: "test_fn".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: crate::config::Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: Default::default(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec!["my_layer".to_string()],
+            architecture: Default::default(),
+        };
+        let layers = vec![crate::config::LayerConfig {
+            resource_name: "my_layer".to_string(),
+            layer_name: "my_layer".to_string(),
+            source_path: Some(dir.clone()),
+            compatible_runtimes: vec![],
+        }];
+        let paths = resolve_layer_paths(&function, &layers, std::path::Path::new("/tmp"));
+        assert_eq!(paths.len(), 1);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_format_duration_sub_microsecond() {
+        let d = std::time::Duration::from_nanos(100);
+        let s = format_duration(d);
+        assert!(s.contains("µs"), "Expected µs, got: {}", s);
+    }
+
+    #[test]
+    fn test_format_bytes_exact_boundary() {
+        assert_eq!(format_bytes(1024), "1.0KB");
+    }
+
+    #[test]
+    fn test_is_binary_svg_is_binary() {
+        // SVG starts with "image/" so is_binary_content_type treats it as binary
+        assert!(is_binary_content_type("image/svg+xml"));
+    }
+
+    #[test]
+    fn test_is_binary_graphql_is_not_binary() {
+        assert!(!is_binary_content_type("application/graphql"));
+    }
 }
 
 /// Resolve layer paths for a Lambda function.
