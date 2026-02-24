@@ -306,6 +306,37 @@ fn test_parse_multi_gateway_fixture() {
 }
 
 #[test]
+fn test_multi_rest_gateway_route_assignment() {
+    // Regression test: routes must be assigned to correct REST API gateway,
+    // not all piled onto the first one.
+    let dir = fixture_dir("multi-rest-gateway");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+
+    assert_eq!(config.gateways.len(), 2, "Expected 2 REST API gateways");
+    assert_eq!(config.functions.len(), 2, "Expected 2 Lambda functions");
+
+    let users_gw = config
+        .gateways
+        .iter()
+        .find(|g| g.name == "users-api")
+        .unwrap();
+    let orders_gw = config
+        .gateways
+        .iter()
+        .find(|g| g.name == "orders-api")
+        .unwrap();
+
+    assert_eq!(users_gw.routes.len(), 1, "users-api should have 1 route");
+    assert_eq!(orders_gw.routes.len(), 1, "orders-api should have 1 route");
+
+    assert_eq!(users_gw.routes[0].path, "/users");
+    assert_eq!(users_gw.routes[0].function_resource, "list_users");
+
+    assert_eq!(orders_gw.routes[0].path, "/orders");
+    assert_eq!(orders_gw.routes[0].function_resource, "create_order");
+}
+
+#[test]
 fn test_parse_authorizer_fixture() {
     let dir = fixture_dir("authorizer");
     let config = parser::parse_terraform_dir(&dir).unwrap();

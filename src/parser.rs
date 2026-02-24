@@ -1442,7 +1442,20 @@ fn resolve_api_gateway_routes(
             authorizer,
         };
 
-        if let Some(gateway) = config.gateways.first_mut() {
+        // Match route to correct gateway by rest_api_id reference
+        let api_resource_name = extract_resource_name_from_ref(&integration.rest_api_ref);
+        let gw_index = config
+            .gateways
+            .iter()
+            .position(|g| g.resource_name == api_resource_name && g.api_type == ApiType::Rest)
+            .or(if config.gateways.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
+        let gateway = gw_index.and_then(|i| config.gateways.get_mut(i));
+
+        if let Some(gateway) = gateway {
             if route.authorizer.is_some() {
                 tracing::info!(
                     "Resolved route: {} {} → {} (with authorizer)",
