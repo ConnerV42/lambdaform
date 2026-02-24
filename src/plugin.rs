@@ -769,6 +769,72 @@ mod tests {
         assert_eq!(event["x-plugin-injected"], "true");
     }
 
+    #[test]
+    fn test_plugin_response_default_ok() {
+        // ok defaults to true when not specified
+        let json = r#"{"capabilities": null}"#;
+        let resp: PluginResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.ok);
+    }
+
+    #[test]
+    fn test_plugin_response_error() {
+        let json = r#"{"ok": false, "error": "something broke"}"#;
+        let resp: PluginResponse = serde_json::from_str(json).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap(), "something broke");
+    }
+
+    #[test]
+    fn test_plugin_capabilities_defaults() {
+        let caps = PluginCapabilities::default();
+        assert!(caps.version.is_empty());
+        assert!(caps.resource_types.is_empty());
+        assert!(!caps.intercept_requests);
+        assert!(!caps.intercept_responses);
+        assert!(caps.description.is_empty());
+    }
+
+    #[test]
+    fn test_on_response_request_serialization() {
+        let req = PluginRequest::OnResponse {
+            method: "POST".to_string(),
+            path: "/api/data".to_string(),
+            response: serde_json::json!({"statusCode": 200}),
+            function_name: "my_handler".to_string(),
+            config: HashMap::new(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"kind\":\"on_response\""));
+        assert!(json.contains("my_handler"));
+    }
+
+    #[test]
+    fn test_plugin_entry_with_config() {
+        let json = r#"{
+            "name": "s3-local",
+            "path": "./plugins/s3.py",
+            "config": {"data_dir": "/tmp/s3", "port": 9000}
+        }"#;
+        let entry: PluginEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.name, "s3-local");
+        assert_eq!(entry.config.len(), 2);
+    }
+
+    #[test]
+    fn test_plugin_entry_without_config() {
+        let json = r#"{"name": "minimal", "path": "/bin/plugin"}"#;
+        let entry: PluginEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.config.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_manager_queries_empty() {
+        let manager = PluginManager::new();
+        assert!(manager.plugins_for_resource("aws_s3_bucket").is_empty());
+        assert!(manager.plugin_names().is_empty());
+    }
+
     #[tokio::test]
     async fn test_plugin_manager_load_real_plugin() {
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

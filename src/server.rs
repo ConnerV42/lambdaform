@@ -1744,6 +1744,154 @@ mod tests {
     fn test_is_binary_graphql_is_not_binary() {
         assert!(!is_binary_content_type("application/graphql"));
     }
+
+    #[test]
+    fn test_is_binary_yaml_types() {
+        assert!(!is_binary_content_type("application/yaml"));
+        assert!(!is_binary_content_type("application/x-yaml"));
+    }
+
+    #[test]
+    fn test_is_binary_with_charset_suffix() {
+        // Charset parameter should be stripped before checking
+        assert!(!is_binary_content_type("application/json; charset=utf-8"));
+        assert!(is_binary_content_type(
+            "application/octet-stream; name=file.bin"
+        ));
+    }
+
+    #[test]
+    fn test_is_binary_video_audio() {
+        assert!(is_binary_content_type("video/mp4"));
+        assert!(is_binary_content_type("audio/ogg"));
+        assert!(is_binary_content_type("video/webm"));
+    }
+
+    #[test]
+    fn test_is_binary_font_types() {
+        assert!(is_binary_content_type("font/woff2"));
+        assert!(is_binary_content_type("font/ttf"));
+    }
+
+    #[test]
+    fn test_format_duration_boundary_1ms() {
+        let d = std::time::Duration::from_millis(1);
+        let s = format_duration(d);
+        assert!(s.contains("ms"), "Expected ms, got: {}", s);
+    }
+
+    #[test]
+    fn test_format_duration_boundary_999ms() {
+        let d = std::time::Duration::from_millis(999);
+        let s = format_duration(d);
+        assert!(s.contains("ms"), "Expected ms, got: {}", s);
+    }
+
+    #[test]
+    fn test_format_duration_boundary_1000ms() {
+        let d = std::time::Duration::from_millis(1000);
+        let s = format_duration(d);
+        assert!(s.contains("s"), "Expected s, got: {}", s);
+        assert!(!s.contains("ms"), "Should not contain ms, got: {}", s);
+    }
+
+    #[test]
+    fn test_format_bytes_large_megabytes() {
+        let s = format_bytes(100 * 1024 * 1024);
+        assert!(s.contains("MB"), "Expected MB, got: {}", s);
+        assert!(s.starts_with("100"));
+    }
+
+    #[test]
+    fn test_build_cors_layer_specific_headers() {
+        let config = CorsConfig {
+            allow_origins: vec!["https://a.com".to_string(), "https://b.com".to_string()],
+            allow_methods: vec!["GET".to_string()],
+            allow_headers: vec!["Content-Type".to_string(), "X-Api-Key".to_string()],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age: Some(600),
+        };
+        let _layer = build_cors_layer(Some(&config));
+    }
+
+    #[test]
+    fn test_resolve_layer_paths_zip_file() {
+        // Layer with a .zip source_path should look for extracted dir
+        let dir = std::env::temp_dir().join("lambdaform_test_layer_zip");
+        let _ = std::fs::create_dir_all(&dir);
+        let zip_path = dir.join("layer.zip");
+        std::fs::write(&zip_path, b"fake zip").unwrap();
+        // Create dir matching zip name minus extension
+        let extracted = dir.join("layer");
+        let _ = std::fs::create_dir_all(&extracted);
+
+        let function = LambdaConfig {
+            resource_name: "test_fn".to_string(),
+            function_name: "test_fn".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: crate::config::Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: Default::default(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec!["zip_layer".to_string()],
+            architecture: Default::default(),
+        };
+        let layers = vec![crate::config::LayerConfig {
+            resource_name: "zip_layer".to_string(),
+            layer_name: "zip_layer".to_string(),
+            source_path: Some(zip_path),
+            compatible_runtimes: vec![],
+        }];
+        let paths = resolve_layer_paths(&function, &layers, std::path::Path::new("/tmp"));
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("layer"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_layer_paths_multiple_layers() {
+        let dir1 = std::env::temp_dir().join("lambdaform_test_multi_layer1");
+        let dir2 = std::env::temp_dir().join("lambdaform_test_multi_layer2");
+        let _ = std::fs::create_dir_all(&dir1);
+        let _ = std::fs::create_dir_all(&dir2);
+
+        let function = LambdaConfig {
+            resource_name: "test_fn".to_string(),
+            function_name: "test_fn".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: crate::config::Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: Default::default(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec!["layer_a".to_string(), "layer_b".to_string()],
+            architecture: Default::default(),
+        };
+        let layers = vec![
+            crate::config::LayerConfig {
+                resource_name: "layer_a".to_string(),
+                layer_name: "layer_a".to_string(),
+                source_path: Some(dir1.clone()),
+                compatible_runtimes: vec![],
+            },
+            crate::config::LayerConfig {
+                resource_name: "layer_b".to_string(),
+                layer_name: "layer_b".to_string(),
+                source_path: Some(dir2.clone()),
+                compatible_runtimes: vec![],
+            },
+        ];
+        let paths = resolve_layer_paths(&function, &layers, std::path::Path::new("/tmp"));
+        assert_eq!(paths.len(), 2);
+
+        let _ = std::fs::remove_dir(&dir1);
+        let _ = std::fs::remove_dir(&dir2);
+    }
 }
 
 /// Resolve layer paths for a Lambda function.

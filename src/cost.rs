@@ -552,4 +552,134 @@ mod tests {
         assert_eq!(json["architecture"], "x86_64");
         assert!(json["functions"].is_array());
     }
+
+    #[test]
+    fn test_unknown_function_defaults_128mb() {
+        // Entry references a function not in the config list
+        let entries = vec![make_entry("mystery_fn", 200, "2026-02-16T10:00:00Z")];
+        let functions = vec![]; // no matching config
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
+
+        assert_eq!(report.functions.len(), 1);
+        assert_eq!(report.functions[0].memory_mb, 128); // default
+        assert_eq!(report.functions[0].resource_name, "mystery_fn");
+    }
+
+    #[test]
+    fn test_single_entry_no_projection() {
+        // Monthly projection requires at least 2 entries
+        let entries = vec![make_entry("handler", 100, "2026-02-16T10:00:00Z")];
+        let functions = vec![make_lambda("handler", 128)];
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
+        assert!(report.monthly_projection.is_none());
+    }
+
+    #[test]
+    fn test_p95_single_invocation() {
+        let entries = vec![make_entry("handler", 42, "2026-02-16T10:00:00Z")];
+        let functions = vec![make_lambda("handler", 128)];
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
+        let fc = &report.functions[0];
+        assert_eq!(fc.p95_duration_ms, 42);
+        assert_eq!(fc.max_duration_ms, 42);
+        assert!((fc.avg_duration_ms - 42.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_format_report_empty() {
+        let report = estimate_costs(&[], &[], Architecture::X86_64);
+        let text = format_report(&report);
+        assert!(text.contains("No invocations recorded"));
+    }
+
+    #[test]
+    fn test_format_report_with_data() {
+        let entries = vec![
+            make_entry("handler", 100, "2026-02-16T10:00:00Z"),
+            make_entry("handler", 200, "2026-02-16T11:00:00Z"),
+        ];
+        let functions = vec![make_lambda("handler", 256)];
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
+        let text = format_report(&report);
+        assert!(text.contains("handler"));
+        assert!(text.contains("256MB"));
+        assert!(text.contains("Invocations: 2"));
+        assert!(text.contains("Monthly Projection"));
+    }
+
+    #[test]
+    fn test_json_output_arm64() {
+        let entries = vec![make_entry("handler", 100, "2026-02-16T10:00:00Z")];
+        let functions = vec![make_lambda("handler", 256)];
+        let report = estimate_costs(&entries, &functions, Architecture::Arm64);
+        let json = format_report_json(&report);
+        assert_eq!(json["architecture"], "arm64");
+    }
+
+    #[test]
+    fn test_json_output_with_monthly_projection() {
+        let entries = vec![
+            make_entry("handler", 100, "2026-02-16T10:00:00Z"),
+            make_entry("handler", 200, "2026-02-16T11:00:00Z"),
+        ];
+        let functions = vec![make_lambda("handler", 256)];
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
+        let json = format_report_json(&report);
+        assert!(json["monthly_projection"].is_object());
+        assert!(
+            json["monthly_projection"]["observation_hours"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn test_functions_sorted_by_cost_descending() {
+        let entries = vec![
+            make_entry("cheap_fn", 10, "2026-02-16T10:00:00Z"),
+            make_entry("expensive_fn", 5000, "2026-02-16T10:00:00Z"),
+        ];
+        let functions = vec![
+            make_lambda("cheap_fn", 128),
+            make_lambda("expensive_fn", 1024),
+        ];
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
+        assert_eq!(report.functions.len(), 2);
+        assert!(report.functions[0].total_cost >= report.functions[1].total_cost);
+        assert_eq!(report.functions[0].function_name, "expensive_fn");
+    }
+
+    #[test]
+    fn test_gb_seconds_calculation() {
+        // 1024MB for 1000ms = 1.0 GB-second exactly
+        let entries = vec![make_entry("handler", 1000, "2026-02-16T10:00:00Z")];
+        let functions = vec![make_lambda("handler", 1024)];
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
+        assert!((report.functions[0].gb_seconds - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_format_number_edge_cases() {
+        assert_eq!(format_number(1), "1");
+        assert_eq!(format_number(12), "12");
+        assert_eq!(format_number(123), "123");
+        assert_eq!(format_number(1234), "1,234");
+        assert_eq!(format_number(12345), "12,345");
+        assert_eq!(format_number(123456789), "123,456,789");
+    }
+
+    #[test]
+    fn test_free_tier_covers_small_usage() {
+        // Small usage should be fully covered by free tier
+        let entries = vec![
+            make_entry("handler", 50, "2026-02-16T10:00:00Z"),
+            make_entry("handler", 50, "2026-02-16T11:00:00Z"),
+        ];
+        let functions = vec![make_lambda("handler", 128)];
+        let report = estimate_costs(&entries, &functions, Architecture::X86_64);
+        let proj = report.monthly_projection.unwrap();
+        assert_eq!(proj.projected_cost_after_free_tier, 0.0);
+        assert!(proj.free_tier_savings > 0.0);
+    }
 }
