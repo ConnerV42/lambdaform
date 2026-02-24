@@ -1554,8 +1554,14 @@ fn resolve_apigatewayv2_routes(
         .collect();
 
     for route in routes {
+        // Determine if this route belongs to a WebSocket gateway
+        let api_resource_name_for_type = extract_resource_name_from_ref(&route.api_ref);
+        let is_websocket = config.gateways.iter().any(|g| {
+            g.resource_name == api_resource_name_for_type && g.api_type == ApiType::WebSocket
+        });
+
         // Parse route_key: "GET /users/{id}" or "$default"
-        let (method, path) = parse_v2_route_key(&route.route_key);
+        let (method, path) = parse_v2_route_key(&route.route_key, is_websocket);
 
         // Resolve target integration → lambda
         // target is like "integrations/${aws_apigatewayv2_integration.name.id}"
@@ -1648,9 +1654,17 @@ fn resolve_apigatewayv2_routes(
 
 /// Parse a v2 route key like "GET /users/{id}" into (HttpMethod, path)
 /// For WebSocket APIs, route keys are: $connect, $disconnect, $default, or custom action names
-fn parse_v2_route_key(route_key: &str) -> (HttpMethod, String) {
+fn parse_v2_route_key(route_key: &str, is_websocket: bool) -> (HttpMethod, String) {
     match route_key {
-        "$default" => (HttpMethod::Any, "/{proxy+}".to_string()),
+        "$default" => {
+            if is_websocket {
+                // WebSocket $default stays as "$default" — it's a route key, not an HTTP path
+                (HttpMethod::Any, "$default".to_string())
+            } else {
+                // HTTP API $default maps to catch-all path
+                (HttpMethod::Any, "/{proxy+}".to_string())
+            }
+        }
         "$connect" | "$disconnect" => (HttpMethod::Any, route_key.to_string()),
         _ => {
             let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
@@ -3418,5 +3432,78 @@ resource "aws_lambda_function" "handler" {
             gateway.routes.iter().any(|r| r.path == "/items"),
             "Should have /items route"
         );
+    }
+
+    #[test]
+    fn test_parse_websocket_default_route() {
+        let tf_content = r#"
+resource "aws_lambda_function" "connect" {
+  function_name = "ws-connect"
+  handler       = "connect.handler"
+  runtime       = "nodejs20.x"
+}
+
+resource "aws_lambda_function" "default_fn" {
+  function_name = "ws-default"
+  handler       = "default.handler"
+  runtime       = "nodejs20.x"
+}
+
+resource "aws_apigatewayv2_api" "ws" {
+  name                       = "ws-api"
+  protocol_type              = "WEBSOCKET"
+  route_selection_expression = "$request.body.action"
+}
+
+resource "aws_apigatewayv2_integration" "connect" {
+  api_id           = aws_apigatewayv2_api.ws.id
+  integration_type = "AWS_PROXY"
+  integration_uri  = aws_lambda_function.connect.invoke_arn
+}
+
+resource "aws_apigatewayv2_integration" "default_fn" {
+  api_id           = aws_apigatewayv2_api.ws.id
+  integration_type = "AWS_PROXY"
+  integration_uri  = aws_lambda_function.default_fn.invoke_arn
+}
+
+resource "aws_apigatewayv2_route" "connect" {
+  api_id    = aws_apigatewayv2_api.ws.id
+  route_key = "$connect"
+  target    = "integrations/${aws_apigatewayv2_integration.connect.id}"
+}
+
+resource "aws_apigatewayv2_route" "default" {
+  api_id    = aws_apigatewayv2_api.ws.id
+  route_key = "$default"
+  target    = "integrations/${aws_apigatewayv2_integration.default_fn.id}"
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        let gw = &config.gateways[0];
+        assert_eq!(gw.api_type, ApiType::WebSocket);
+        assert_eq!(gw.routes.len(), 2);
+
+        // $connect stays as $connect
+        let connect = gw
+            .routes
+            .iter()
+            .find(|r| r.path == "$connect")
+            .expect("Should have $connect route");
+        assert_eq!(connect.function_resource, "connect");
+
+        // $default stays as $default for WebSocket (NOT /{proxy+})
+        let default = gw
+            .routes
+            .iter()
+            .find(|r| r.path == "$default")
+            .expect("Should have $default route");
+        assert_eq!(default.function_resource, "default_fn");
     }
 }

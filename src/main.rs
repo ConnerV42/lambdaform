@@ -769,7 +769,7 @@ async fn cmd_start(
         for route in &ws_gw.routes {
             println!("   {} → {}", route.path, route.function_resource);
         }
-        println!("   @connections API → http://localhost:{}", ws_port + 1000);
+        println!("   @connections API → http://localhost:{}", ws_port + 1);
 
         let ws_config = config.clone();
         let ws_dir = dir.clone();
