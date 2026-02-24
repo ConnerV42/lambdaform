@@ -450,6 +450,67 @@ mod tests {
         assert!(resp.result.is_none());
         assert_eq!(resp.error.as_deref(), Some("timeout"));
     }
+
+    #[test]
+    fn test_worker_response_with_null_fields() {
+        let json = r#"{"id":"req-3","success":true,"result":null,"error":null}"#;
+        let resp: WorkerResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, "req-3");
+        assert!(resp.success);
+        assert!(resp.result.is_none());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_worker_response_complex_result() {
+        let json = r#"{"id":"req-4","success":true,"result":{"statusCode":200,"headers":{"Content-Type":"application/json"},"body":"{\"items\":[1,2,3]}"}}"#;
+        let resp: WorkerResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.success);
+        let result = resp.result.unwrap();
+        assert_eq!(result["statusCode"], 200);
+        assert_eq!(result["headers"]["Content-Type"], "application/json");
+    }
+
+    #[test]
+    fn test_worker_response_missing_optional_fields() {
+        // Both result and error omitted entirely
+        let json = r#"{"id":"req-5","success":true}"#;
+        let resp: WorkerResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.success);
+        assert!(resp.result.is_none());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_pool_default_trait() {
+        let pool = ProcessPool::default();
+        // Should behave identically to new()
+        let workers = pool.workers.try_lock().unwrap();
+        assert!(workers.is_empty());
+    }
+
+    #[test]
+    fn test_worker_key_same_function_same_handler() {
+        let key1: WorkerKey = ("func_a".to_string(), "index.handler".to_string());
+        let key2: WorkerKey = ("func_a".to_string(), "index.handler".to_string());
+        assert_eq!(key1, key2);
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_all_is_idempotent() {
+        let pool = ProcessPool::new();
+        pool.invalidate_all().await;
+        pool.invalidate_all().await;
+        let workers = pool.workers.lock().await;
+        assert!(workers.is_empty());
+    }
+
+    #[test]
+    fn test_worker_response_invalid_json_fails() {
+        let json = r#"{"id":"req-6","success":"not_a_bool"}"#;
+        let result: Result<WorkerResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
 }
 
 async fn spawn_python_worker(

@@ -654,4 +654,218 @@ mod tests {
         let dot = render_dot(&nodes, &edges);
         assert!(dot.contains("digraph lambdaform"));
     }
+
+    #[test]
+    fn test_sns_topic_in_graph() {
+        let mut config = LambdaformConfig::default();
+        config.sns_topics.push(SnsTopicConfig {
+            resource_name: "alerts".to_string(),
+            name: "alert-topic".to_string(),
+            fifo_topic: false,
+        });
+        config.functions.push(LambdaConfig {
+            resource_name: "alert_handler".to_string(),
+            function_name: "alert-handler".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: HashMap::new(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        });
+        config.event_source_mappings.push(EventSourceMappingConfig {
+            resource_name: "alert_sub".to_string(),
+            source_type: EventSourceType::Sns,
+            source_resource: "alerts".to_string(),
+            function_resource: "alert_handler".to_string(),
+            batch_size: 1,
+            enabled: true,
+        });
+        let (nodes, edges) = build_graph(&config);
+        assert_eq!(nodes.len(), 2); // lambda + sns
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].label, "SNS subscription");
+    }
+
+    #[test]
+    fn test_step_function_invokes_lambda() {
+        let mut config = LambdaformConfig::default();
+        config.functions.push(LambdaConfig {
+            resource_name: "processor".to_string(),
+            function_name: "my-processor".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Python312,
+            source_path: None,
+            filename_ref: None,
+            environment: HashMap::new(),
+            timeout: 60,
+            memory_size: 256,
+            layers: vec![],
+            architecture: Architecture::default(),
+        });
+        config.state_machines.push(StepFunctionConfig {
+            resource_name: "pipeline".to_string(),
+            name: "data-pipeline".to_string(),
+            definition: r#"{"States":{"Process":{"Type":"Task","Resource":"arn:aws:lambda:us-east-1:123:function:processor"}}}"#.to_string(),
+            machine_type: "STANDARD".to_string(),
+            role_arn_ref: None,
+        });
+        let (nodes, edges) = build_graph(&config);
+        assert_eq!(nodes.len(), 2); // lambda + sfn
+                                    // sfn → lambda invocation edge
+        let invoke_edges: Vec<_> = edges.iter().filter(|e| e.label == "invokes").collect();
+        assert_eq!(invoke_edges.len(), 1);
+        assert_eq!(invoke_edges[0].from, "sfn_pipeline");
+        assert_eq!(invoke_edges[0].to, "lambda_processor");
+    }
+
+    #[test]
+    fn test_authorizer_edge() {
+        let mut config = LambdaformConfig::default();
+        config.functions.push(LambdaConfig {
+            resource_name: "api_fn".to_string(),
+            function_name: "api".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: HashMap::new(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        });
+        config.functions.push(LambdaConfig {
+            resource_name: "auth_fn".to_string(),
+            function_name: "authorizer".to_string(),
+            handler: "auth.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: HashMap::new(),
+            timeout: 5,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        });
+        config.gateways.push(ApiGatewayConfig {
+            resource_name: "gw".to_string(),
+            name: "my-gw".to_string(),
+            api_type: ApiType::Rest,
+            routes: vec![RouteConfig {
+                method: HttpMethod::Get,
+                path: "/protected".to_string(),
+                function_resource: "api_fn".to_string(),
+                authorizer: Some(AuthorizerConfig {
+                    auth_type: AuthorizerType::Lambda,
+                    function_resource: Some("auth_fn".to_string()),
+                }),
+            }],
+            route_selection_expression: None,
+        });
+        let (_nodes, edges) = build_graph(&config);
+        let auth_edges: Vec<_> = edges.iter().filter(|e| e.label == "authorizer").collect();
+        assert_eq!(auth_edges.len(), 1);
+        assert_eq!(auth_edges[0].to, "lambda_auth_fn");
+    }
+
+    #[test]
+    fn test_fifo_queue_detail() {
+        let mut config = LambdaformConfig::default();
+        config.sqs_queues.push(SqsQueueConfig {
+            resource_name: "orders".to_string(),
+            name: "orders.fifo".to_string(),
+            fifo_queue: true,
+            visibility_timeout: 60,
+        });
+        let (nodes, _edges) = build_graph(&config);
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].details.contains(&"FIFO".to_string()));
+    }
+
+    #[test]
+    fn test_node_kind_properties() {
+        // Verify all NodeKind variants have non-empty labels, colors, shapes
+        let kinds = vec![
+            NodeKind::Lambda,
+            NodeKind::ApiGateway,
+            NodeKind::DynamoDB,
+            NodeKind::SqsQueue,
+            NodeKind::SnsTopic,
+            NodeKind::Layer,
+            NodeKind::StepFunction,
+        ];
+        for kind in &kinds {
+            assert!(!kind.label().is_empty());
+            assert!(kind.dot_color().starts_with('#'));
+            assert!(!kind.dot_shape().is_empty());
+            assert!(kind.ansi_color().starts_with("\x1b["));
+        }
+    }
+
+    #[test]
+    fn test_render_dot_edge_styles() {
+        let nodes = vec![
+            GraphNode {
+                id: "a".into(),
+                kind: NodeKind::Lambda,
+                display_name: "A".into(),
+                details: vec![],
+            },
+            GraphNode {
+                id: "b".into(),
+                kind: NodeKind::Layer,
+                display_name: "B".into(),
+                details: vec![],
+            },
+        ];
+        let edges = vec![GraphEdge {
+            from: "a".into(),
+            to: "b".into(),
+            label: "uses".into(),
+            style: EdgeStyle::Dashed,
+        }];
+        let dot = render_dot(&nodes, &edges);
+        assert!(dot.contains("style=dashed"));
+    }
+
+    #[test]
+    fn test_render_json_node_fields() {
+        let nodes = vec![GraphNode {
+            id: "lambda_test".into(),
+            kind: NodeKind::Lambda,
+            display_name: "test-fn".into(),
+            details: vec!["runtime: nodejs20.x".into()],
+        }];
+        let json = render_json(&nodes, &[]);
+        let node = &json["nodes"][0];
+        assert_eq!(node["id"], "lambda_test");
+        assert_eq!(node["kind"], "Lambda");
+        assert_eq!(node["name"], "test-fn");
+        assert_eq!(node["details"][0], "runtime: nodejs20.x");
+    }
+
+    #[test]
+    fn test_dynamodb_with_gsi_and_range_key() {
+        let mut config = LambdaformConfig::default();
+        config.dynamodb_tables.push(DynamoDbTableConfig {
+            resource_name: "orders".to_string(),
+            name: "orders-table".to_string(),
+            hash_key: Some("orderId".to_string()),
+            range_key: Some("timestamp".to_string()),
+            billing_mode: "PAY_PER_REQUEST".to_string(),
+            gsi_names: vec!["by-customer".to_string(), "by-status".to_string()],
+            lsi_names: vec![],
+            stream_enabled: false,
+        });
+        let (nodes, _edges) = build_graph(&config);
+        assert_eq!(nodes.len(), 1);
+        let details = &nodes[0].details;
+        assert!(details.iter().any(|d| d.contains("orderId")));
+        assert!(details.iter().any(|d| d.contains("timestamp")));
+        assert!(details.iter().any(|d| d.contains("by-customer")));
+    }
 }
