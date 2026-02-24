@@ -926,4 +926,91 @@ mod tests {
         let resolved = config.resolve_source_dir(tmp.path());
         assert_eq!(resolved, deploy_dir);
     }
+
+    #[test]
+    fn test_runtime_as_str_roundtrip() {
+        // Every known runtime should round-trip through from_str → as_str
+        let runtimes = vec![
+            "nodejs18.x",
+            "nodejs20.x",
+            "nodejs22.x",
+            "python3.10",
+            "python3.11",
+            "python3.12",
+            "python3.13",
+            "go1.x",
+            "provided.al2",
+            "provided.al2023",
+            "java8.al2",
+            "java11",
+            "java17",
+            "java21",
+        ];
+        for rt_str in runtimes {
+            let rt = Runtime::from_str(rt_str);
+            assert_eq!(rt.as_str(), rt_str, "round-trip failed for {}", rt_str);
+        }
+    }
+
+    #[test]
+    fn test_runtime_is_java() {
+        assert!(Runtime::Java8Al2.is_java());
+        assert!(Runtime::Java11.is_java());
+        assert!(Runtime::Java17.is_java());
+        assert!(Runtime::Java21.is_java());
+        assert!(!Runtime::Nodejs20.is_java());
+        assert!(!Runtime::Python312.is_java());
+        assert!(!Runtime::Go1.is_java());
+    }
+
+    #[test]
+    fn test_java_docker_tag() {
+        assert_eq!(Runtime::Java8Al2.java_docker_tag(), Some("8.al2"));
+        assert_eq!(Runtime::Java11.java_docker_tag(), Some("11"));
+        assert_eq!(Runtime::Java17.java_docker_tag(), Some("17"));
+        assert_eq!(Runtime::Java21.java_docker_tag(), Some("21"));
+        assert_eq!(Runtime::Nodejs20.java_docker_tag(), None);
+        assert_eq!(Runtime::Python312.java_docker_tag(), None);
+    }
+
+    #[test]
+    fn test_architecture_default_is_x86() {
+        let arch = Architecture::default();
+        assert_eq!(arch, Architecture::X86_64);
+    }
+
+    #[test]
+    fn test_unknown_runtime_as_str() {
+        let rt = Runtime::Unknown("dotnet8".to_string());
+        assert_eq!(rt.as_str(), "dotnet8");
+        assert!(!rt.is_nodejs());
+        assert!(!rt.is_python());
+        assert!(!rt.is_java());
+        assert!(!rt.is_custom_runtime());
+    }
+
+    #[test]
+    fn test_resolve_source_dir_explicit_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lambda_dir = tmp.path().join("my-lambda");
+        std::fs::create_dir_all(&lambda_dir).unwrap();
+        std::fs::write(lambda_dir.join("handler.py"), "def handler(e,c): pass").unwrap();
+
+        let config = LambdaConfig {
+            resource_name: "my_func".to_string(),
+            function_name: "my_func".to_string(),
+            handler: "handler.handler".to_string(),
+            runtime: Runtime::Python312,
+            source_path: Some(std::path::PathBuf::from("my-lambda")),
+            filename_ref: None,
+            environment: std::collections::HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+
+        let resolved = config.resolve_source_dir(tmp.path());
+        assert_eq!(resolved, lambda_dir);
+    }
 }

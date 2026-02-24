@@ -414,4 +414,114 @@ mod tests {
 
         assert!(router.match_request(&HttpMethod::Get, "/test").is_some());
     }
+
+    #[test]
+    fn test_multi_gateway_routes_isolated() {
+        let gw1 = ApiGatewayConfig {
+            resource_name: "api_users".to_string(),
+            name: "users-api".to_string(),
+            api_type: ApiType::Rest,
+            routes: vec![make_test_route(HttpMethod::Get, "/users", "list_users")],
+            route_selection_expression: None,
+        };
+        let gw2 = ApiGatewayConfig {
+            resource_name: "api_orders".to_string(),
+            name: "orders-api".to_string(),
+            api_type: ApiType::Http,
+            routes: vec![make_test_route(HttpMethod::Get, "/orders", "list_orders")],
+            route_selection_expression: None,
+        };
+        let funcs = vec![
+            make_test_lambda("list_users"),
+            make_test_lambda("list_orders"),
+        ];
+        let router = Router::new(&[gw1, gw2], &funcs);
+
+        let m1 = router.match_request(&HttpMethod::Get, "/users").unwrap();
+        assert_eq!(m1.function.resource_name, "list_users");
+        assert_eq!(m1.api_type, ApiType::Rest);
+
+        let m2 = router.match_request(&HttpMethod::Get, "/orders").unwrap();
+        assert_eq!(m2.function.resource_name, "list_orders");
+        assert_eq!(m2.api_type, ApiType::Http);
+    }
+
+    #[test]
+    fn test_empty_router_matches_nothing() {
+        let funcs = vec![make_test_lambda("fn1")];
+        let router = Router::new(&[], &funcs);
+
+        assert!(router
+            .match_request(&HttpMethod::Get, "/anything")
+            .is_none());
+    }
+
+    #[test]
+    fn test_root_path_match() {
+        let gw = make_gateway(vec![make_test_route(HttpMethod::Get, "/", "root_fn")]);
+        let funcs = vec![make_test_lambda("root_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router.match_request(&HttpMethod::Get, "/");
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().function.resource_name, "root_fn");
+        // Should NOT match deeper paths
+        assert!(router.match_request(&HttpMethod::Get, "/foo").is_none());
+    }
+
+    #[test]
+    fn test_missing_function_skips_route() {
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/orphan",
+            "nonexistent_fn",
+        )]);
+        let funcs = vec![make_test_lambda("other_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        // Route compiles but function lookup fails → no match
+        assert!(router.match_request(&HttpMethod::Get, "/orphan").is_none());
+    }
+
+    #[test]
+    fn test_same_path_different_methods() {
+        let gw = make_gateway(vec![
+            make_test_route(HttpMethod::Get, "/items", "get_items"),
+            make_test_route(HttpMethod::Post, "/items", "create_item"),
+            make_test_route(HttpMethod::Delete, "/items", "delete_item"),
+        ]);
+        let funcs = vec![
+            make_test_lambda("get_items"),
+            make_test_lambda("create_item"),
+            make_test_lambda("delete_item"),
+        ];
+        let router = Router::new(&[gw], &funcs);
+
+        assert_eq!(
+            router
+                .match_request(&HttpMethod::Get, "/items")
+                .unwrap()
+                .function
+                .resource_name,
+            "get_items"
+        );
+        assert_eq!(
+            router
+                .match_request(&HttpMethod::Post, "/items")
+                .unwrap()
+                .function
+                .resource_name,
+            "create_item"
+        );
+        assert_eq!(
+            router
+                .match_request(&HttpMethod::Delete, "/items")
+                .unwrap()
+                .function
+                .resource_name,
+            "delete_item"
+        );
+        // Unregistered method
+        assert!(router.match_request(&HttpMethod::Put, "/items").is_none());
+    }
 }
