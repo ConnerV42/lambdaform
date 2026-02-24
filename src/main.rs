@@ -985,49 +985,15 @@ fn cmd_invoke(
             lambda.function_name, lambda.runtime
         );
 
-        // Build a minimal Lambda event for direct invocation
-        let lambda_event = runtime::LambdaEvent {
-            http_method: "INVOKE".to_string(),
-            path: "/".to_string(),
-            resource: "/".to_string(),
-            path_parameters: None,
-            query_string_parameters: None,
-            multi_value_query_string_parameters: None,
-            headers: None,
-            multi_value_headers: None,
-            body: Some(event_json),
-            is_base64_encoded: false,
-            request_context: runtime::RequestContext {
-                stage: "local".to_string(),
-                resource_path: "/".to_string(),
-                http_method: "INVOKE".to_string(),
-                request_id: format!(
-                    "invoke-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                ),
-                api_id: "lambdaform".to_string(),
-                path: "/".to_string(),
-                identity: runtime::RequestIdentity {
-                    source_ip: "127.0.0.1".to_string(),
-                },
-            },
-        };
+        // Parse event JSON into a Value for raw invocation
+        let raw_event: serde_json::Value = serde_json::from_str(&event_json)?;
 
         let fn_dir = lambda.resolve_source_dir_with_archives(&dir, &tf_config.archive_files);
         let executor = runtime::FunctionExecutor::new(lambda.clone(), fn_dir);
-        match executor.invoke(lambda_event).await {
-            Ok(response) => {
-                // Pretty-print the response body
-                if let Some(body) = &response.body {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-                        println!("{}", serde_json::to_string_pretty(&parsed)?);
-                    } else {
-                        println!("{}", body);
-                    }
-                }
+        match executor.invoke_raw_event(raw_event).await {
+            Ok(result) => {
+                // Pretty-print the result
+                println!("{}", serde_json::to_string_pretty(&result)?);
                 Ok(())
             }
             Err(e) => {

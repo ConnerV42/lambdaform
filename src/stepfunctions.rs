@@ -202,6 +202,38 @@ fn render_flow(def: &StateMachineDefinition, output: &mut String, indent: usize)
                             visited.push(bn.clone());
                             if let Some(bs) = def.states.get(bn.as_str()) {
                                 render_state(bn, bs, output, &pad);
+
+                                // Handle nested Parallel/Map states within Choice branches
+                                match bs.state_type.as_str() {
+                                    "Parallel" => {
+                                        if let Some(ref branches) = bs.branches {
+                                            for (i, branch) in branches.iter().enumerate() {
+                                                output.push_str(&format!(
+                                                    "\n{}  ── Parallel Branch {} ──\n",
+                                                    pad,
+                                                    i + 1
+                                                ));
+                                                render_flow(branch, output, indent + 2);
+                                            }
+                                            output.push_str(&format!(
+                                                "\n{}  ── End Parallel ──\n",
+                                                pad
+                                            ));
+                                        }
+                                    }
+                                    "Map" => {
+                                        if let Some(ref iterator) = bs.iterator {
+                                            output.push_str(&format!(
+                                                "\n{}  ── Map Iterator ──\n",
+                                                pad
+                                            ));
+                                            render_flow(iterator, output, indent + 2);
+                                            output.push_str(&format!("\n{}  ── End Map ──\n", pad));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+
                                 if bs.end.unwrap_or(false) {
                                     output.push_str(&format!("{}  ┌─────────┐\n", pad));
                                     output.push_str(&format!("{}  │   END   │\n", pad));
