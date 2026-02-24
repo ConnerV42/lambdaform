@@ -24,3 +24,4 @@ Thumbs.db
 *.so
 *.dylib
 docs/book/
+__pycache__/
