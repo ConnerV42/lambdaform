@@ -1562,19 +1562,33 @@ fn resolve_apigatewayv2_routes(
         // or via traversal: "aws_apigatewayv2_integration.name.id"
         let lambda_resource = route.target_ref.as_ref().and_then(|target| {
             // Try extracting integration name from the ref
+            // Direct traversal: "aws_apigatewayv2_integration.name.id"
             let parts: Vec<&str> = target.split('.').collect();
             if parts.len() >= 2 && parts[0] == "aws_apigatewayv2_integration" {
-                integration_lambdas.get(parts[1]).cloned()
+                return integration_lambdas.get(parts[1]).cloned();
+            }
+            // Interpolated string: "integrations/${aws_apigatewayv2_integration.name.id}"
+            if let Some(start) = target.find("aws_apigatewayv2_integration.") {
+                let rest = &target[start + "aws_apigatewayv2_integration.".len()..];
+                let int_name = rest.split('.').next().unwrap_or("");
+                if !int_name.is_empty() {
+                    if let Some(lambda) = integration_lambdas.get(int_name) {
+                        return Some(lambda.clone());
+                    }
+                }
+            }
+            // Fallback: match by api_ref (only if single integration)
+            let matching: Vec<_> = integrations
+                .iter()
+                .filter(|i| {
+                    extract_resource_name_from_ref(&i.api_ref)
+                        == extract_resource_name_from_ref(&route.api_ref)
+                })
+                .collect();
+            if matching.len() == 1 {
+                integration_lambdas.get(&matching[0].resource_name).cloned()
             } else {
-                // Try matching by iterating integrations with same api_ref
-                integrations
-                    .iter()
-                    .find(|i| {
-                        // Match by api_ref
-                        extract_resource_name_from_ref(&i.api_ref)
-                            == extract_resource_name_from_ref(&route.api_ref)
-                    })
-                    .and_then(|i| integration_lambdas.get(&i.resource_name).cloned())
+                None
             }
         });
 
