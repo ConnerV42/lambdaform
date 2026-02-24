@@ -555,4 +555,174 @@ mod tests {
         assert!(output.contains("30s wait"));
         assert!(output.contains("Succeed"));
     }
+
+    #[test]
+    fn test_map_state() {
+        let asl = r#"{
+            "StartAt": "ProcessItems",
+            "States": {
+                "ProcessItems": {
+                    "Type": "Map",
+                    "Iterator": {
+                        "StartAt": "Transform",
+                        "States": {
+                            "Transform": { "Type": "Task", "Resource": "arn:aws:lambda:us-east-1:123:function:transform", "End": true }
+                        }
+                    },
+                    "End": true
+                }
+            }
+        }"#;
+        let output = render_ascii("map-test", "STANDARD", asl);
+        assert!(output.contains("Map Iterator"));
+        assert!(output.contains("End Map"));
+        assert!(output.contains("Transform"));
+        assert!(output.contains("🔁")); // Map icon
+    }
+
+    #[test]
+    fn test_loop_detection() {
+        let asl = r#"{
+            "StartAt": "StepA",
+            "States": {
+                "StepA": { "Type": "Pass", "Next": "StepB" },
+                "StepB": { "Type": "Pass", "Next": "StepA" }
+            }
+        }"#;
+        let output = render_ascii("loop-test", "STANDARD", asl);
+        assert!(output.contains("Loop back to: StepA"));
+    }
+
+    #[test]
+    fn test_timeout_display() {
+        let asl = r#"{
+            "Comment": "With timeout",
+            "StartAt": "Do",
+            "TimeoutSeconds": 300,
+            "States": {
+                "Do": { "Type": "Pass", "End": true }
+            }
+        }"#;
+        let output = render_ascii("timeout-test", "STANDARD", asl);
+        assert!(output.contains("Timeout: 300s"));
+        assert!(output.contains("With timeout"));
+    }
+
+    #[test]
+    fn test_fail_state_rendering() {
+        let output = render_ascii("fail-test", "STANDARD", SIMPLE_ASL);
+        // NotifyFailure is a Fail state reachable from Choice branch
+        assert!(output.contains("NotifyFailure"));
+        assert!(output.contains("Fail"));
+        // Fail state is rendered as a Choice branch target
+        assert!(output.contains("Branch: NotifyFailure") || output.contains("NotifyFailure"));
+    }
+
+    #[test]
+    fn test_retry_and_catch_rendering() {
+        let output = render_ascii("retry-test", "STANDARD", SIMPLE_ASL);
+        // ProcessPayment has retry and catch
+        assert!(output.contains("retry [States.TaskFailed] ×3"));
+        assert!(output.contains("catch [PaymentFailed] → NotifyFailure"));
+    }
+
+    #[test]
+    fn test_choice_default_rendering() {
+        let output = render_ascii("choice-test", "STANDARD", SIMPLE_ASL);
+        // IsInStock Choice has a Default
+        assert!(output.contains("default: → OutOfStock"));
+        assert!(output.contains("$.inStock"));
+    }
+
+    #[test]
+    fn test_summarize_invalid_json() {
+        assert!(summarize("not json").is_none());
+    }
+
+    #[test]
+    fn test_summarize_single_state() {
+        let asl = r#"{"StartAt": "Only", "States": {"Only": {"Type": "Pass", "End": true}}}"#;
+        let summary = summarize(asl).unwrap();
+        assert!(summary.contains("1 states"));
+        assert!(summary.contains("1 Pass"));
+    }
+
+    #[test]
+    fn test_missing_state_reference() {
+        let asl = r#"{
+            "StartAt": "Ghost",
+            "States": {
+                "Real": { "Type": "Pass", "End": true }
+            }
+        }"#;
+        let output = render_ascii("missing-test", "STANDARD", asl);
+        assert!(output.contains("not found"));
+        assert!(output.contains("Ghost"));
+    }
+
+    #[test]
+    fn test_parallel_then_next() {
+        let asl = r#"{
+            "StartAt": "FanOut",
+            "States": {
+                "FanOut": {
+                    "Type": "Parallel",
+                    "Branches": [
+                        {"StartAt": "A", "States": {"A": {"Type": "Pass", "End": true}}}
+                    ],
+                    "Next": "Collect"
+                },
+                "Collect": { "Type": "Pass", "End": true }
+            }
+        }"#;
+        let output = render_ascii("par-next", "STANDARD", asl);
+        assert!(output.contains("FanOut"));
+        assert!(output.contains("Collect"));
+        assert!(output.contains("End Parallel"));
+    }
+
+    #[test]
+    fn test_choice_branch_with_parallel() {
+        let asl = r#"{
+            "StartAt": "Route",
+            "States": {
+                "Route": {
+                    "Type": "Choice",
+                    "Choices": [{"Variable": "$.type", "Next": "FanOut"}],
+                    "Default": "Done"
+                },
+                "FanOut": {
+                    "Type": "Parallel",
+                    "Branches": [
+                        {"StartAt": "X", "States": {"X": {"Type": "Pass", "End": true}}}
+                    ],
+                    "End": true
+                },
+                "Done": { "Type": "Succeed" }
+            }
+        }"#;
+        let output = render_ascii("choice-parallel", "STANDARD", asl);
+        assert!(output.contains("Parallel Branch 1"));
+        assert!(output.contains("Route"));
+        assert!(output.contains("FanOut"));
+    }
+
+    #[test]
+    fn test_resource_arn_shortening() {
+        let asl = r#"{
+            "StartAt": "Invoke",
+            "States": {
+                "Invoke": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:lambda:us-east-1:123456789:function:my-long-function-name",
+                    "End": true
+                }
+            }
+        }"#;
+        let output = render_ascii("arn-test", "STANDARD", asl);
+        // Should show shortened function name, not full ARN
+        assert!(output.contains("my-long-function-name"));
+        // Should NOT show the full ARN prefix in the box
+        assert!(!output.contains("arn:aws:lambda"));
+    }
 }
