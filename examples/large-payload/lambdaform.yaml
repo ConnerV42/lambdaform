@@ -1,0 +1,7 @@
+functions:
+  text_echo:
+    source_path: .
+  binary_handler:
+    source_path: .
+  image_processor:
+    source_path: .

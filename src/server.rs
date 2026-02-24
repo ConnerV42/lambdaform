@@ -1426,6 +1426,20 @@ async fn handle_request(
                 }
             }
 
+            // Handle base64-encoded response bodies (Lambda returns isBase64Encoded: true
+            // for binary responses like images, PDFs, etc.)
+            if response.is_base64_encoded {
+                use base64::Engine;
+                if let Ok(decoded) =
+                    base64::engine::general_purpose::STANDARD.decode(&response_body)
+                {
+                    return builder
+                        .body(axum::body::Body::from(decoded))
+                        .unwrap_or_default()
+                        .into_response();
+                }
+            }
+
             builder.body(response_body.into()).unwrap_or_else(|_| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
