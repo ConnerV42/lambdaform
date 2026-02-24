@@ -3669,4 +3669,275 @@ resource "aws_sns_topic_subscription" "orders_email" {
             "notifier"
         );
     }
+
+    #[test]
+    fn test_parse_v2_route_key_http_methods() {
+        // Standard HTTP route keys
+        assert_eq!(
+            parse_v2_route_key("GET /users", false),
+            (HttpMethod::Get, "/users".to_string())
+        );
+        assert_eq!(
+            parse_v2_route_key("POST /users/{id}", false),
+            (HttpMethod::Post, "/users/{id}".to_string())
+        );
+        assert_eq!(
+            parse_v2_route_key("DELETE /items/{id}", false),
+            (HttpMethod::Delete, "/items/{id}".to_string())
+        );
+        // $default in HTTP context → catch-all
+        assert_eq!(
+            parse_v2_route_key("$default", false),
+            (HttpMethod::Any, "/{proxy+}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_v2_route_key_websocket() {
+        // WebSocket special routes
+        assert_eq!(
+            parse_v2_route_key("$connect", true),
+            (HttpMethod::Any, "$connect".to_string())
+        );
+        assert_eq!(
+            parse_v2_route_key("$disconnect", true),
+            (HttpMethod::Any, "$disconnect".to_string())
+        );
+        // $default in WebSocket context stays as "$default"
+        assert_eq!(
+            parse_v2_route_key("$default", true),
+            (HttpMethod::Any, "$default".to_string())
+        );
+        // Custom WebSocket action
+        assert_eq!(
+            parse_v2_route_key("sendmessage", true),
+            (HttpMethod::Any, "sendmessage".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_lambda_name_from_ref() {
+        assert_eq!(
+            extract_lambda_name_from_ref("aws_lambda_function.hello.invoke_arn"),
+            "hello"
+        );
+        assert_eq!(
+            extract_lambda_name_from_ref("aws_lambda_function.my_func.arn"),
+            "my_func"
+        );
+        // Non-lambda ref returns as-is
+        assert_eq!(
+            extract_lambda_name_from_ref("aws_sqs_queue.orders.arn"),
+            "aws_sqs_queue.orders.arn"
+        );
+        // Short ref returns as-is
+        assert_eq!(extract_lambda_name_from_ref("something"), "something");
+    }
+
+    #[test]
+    fn test_extract_resource_name_from_ref() {
+        assert_eq!(
+            extract_resource_name_from_ref("aws_api_gateway_resource.hello.id"),
+            "hello"
+        );
+        assert_eq!(
+            extract_resource_name_from_ref("aws_lambda_function.worker.arn"),
+            "worker"
+        );
+        assert_eq!(extract_resource_name_from_ref("solo"), "solo");
+    }
+
+    #[test]
+    fn test_is_local_module_source() {
+        assert!(is_local_module_source("./modules/api"));
+        assert!(is_local_module_source("../shared"));
+        assert!(!is_local_module_source("hashicorp/consul/aws"));
+        assert!(!is_local_module_source(
+            "git::https://example.com/module.git"
+        ));
+        assert!(!is_local_module_source("s3::https://bucket/module.zip"));
+    }
+
+    #[test]
+    fn test_parse_http_method_variants() {
+        assert_eq!(parse_http_method("GET"), HttpMethod::Get);
+        assert_eq!(parse_http_method("get"), HttpMethod::Get);
+        assert_eq!(parse_http_method("Post"), HttpMethod::Post);
+        assert_eq!(parse_http_method("PUT"), HttpMethod::Put);
+        assert_eq!(parse_http_method("PATCH"), HttpMethod::Patch);
+        assert_eq!(parse_http_method("DELETE"), HttpMethod::Delete);
+        assert_eq!(parse_http_method("OPTIONS"), HttpMethod::Options);
+        assert_eq!(parse_http_method("HEAD"), HttpMethod::Head);
+        assert_eq!(parse_http_method("ANY"), HttpMethod::Any);
+        // Unknown defaults to Any
+        assert_eq!(parse_http_method("CONNECT"), HttpMethod::Any);
+    }
+
+    #[test]
+    fn test_parse_function_url() {
+        let tf_content = r#"
+resource "aws_lambda_function" "api" {
+  function_name = "url-handler"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "api.zip"
+}
+
+resource "aws_lambda_function_url" "api_url" {
+  function_name      = aws_lambda_function.api.function_name
+  authorization_type = "NONE"
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.functions.len(), 1);
+        assert_eq!(config.function_urls.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_archive_file_data_block() {
+        // Verify archive_file data blocks are parsed and stored
+        let tf_content = r#"
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_dir  = "src"
+  output_path = "lambda.zip"
+}
+
+resource "aws_lambda_function" "hello" {
+  function_name    = "hello"
+  handler          = "index.handler"
+  runtime          = "nodejs20.x"
+  role             = "arn:aws:iam::role/test"
+  filename         = "hello.zip"
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions.len(), 1);
+        // archive_files should be parsed
+        assert_eq!(config.archive_files.len(), 1);
+        assert_eq!(config.archive_files[0].resource_name, "lambda_zip");
+    }
+
+    #[test]
+    fn test_parse_apigw_v2_with_authorizer() {
+        let tf_content = r#"
+resource "aws_apigatewayv2_api" "http" {
+  name          = "http-api"
+  protocol_type = "HTTP"
+}
+
+resource "aws_lambda_function" "auth" {
+  function_name = "authorizer"
+  handler       = "auth.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "auth.zip"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api-handler"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "api.zip"
+}
+
+resource "aws_apigatewayv2_authorizer" "jwt" {
+  api_id                            = aws_apigatewayv2_api.http.id
+  authorizer_type                   = "REQUEST"
+  authorizer_uri                    = aws_lambda_function.auth.invoke_arn
+  name                              = "jwt-auth"
+  authorizer_payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_integration" "api" {
+  api_id             = aws_apigatewayv2_api.http.id
+  integration_type   = "AWS_PROXY"
+  integration_uri    = aws_lambda_function.api.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "get_users" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "GET /users"
+  target             = "integrations/${aws_apigatewayv2_integration.api.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        // Should have both functions
+        assert_eq!(config.functions.len(), 2);
+        // Should have one API GW (v2 HTTP)
+        let v2_gws: Vec<_> = config
+            .gateways
+            .iter()
+            .filter(|g| g.api_type == ApiType::Http)
+            .collect();
+        assert_eq!(v2_gws.len(), 1);
+        assert_eq!(v2_gws[0].routes.len(), 1);
+        // Route should have authorizer reference
+        assert!(v2_gws[0].routes[0].authorizer.is_some());
+    }
+
+    #[test]
+    fn test_variable_resolver_traversal() {
+        let mut resolver = VariableResolver::default();
+        resolver
+            .variables
+            .insert("region".to_string(), "us-west-2".to_string());
+        resolver
+            .variables
+            .insert("env".to_string(), "prod".to_string());
+
+        // Direct variable resolution
+        assert_eq!(resolver.resolve("${var.region}"), "us-west-2");
+        // Multiple variables in one string
+        assert_eq!(
+            resolver.resolve("${var.env}-${var.region}"),
+            "prod-us-west-2"
+        );
+        // Unknown variable left as-is
+        assert_eq!(resolver.resolve("${var.unknown}"), "${var.unknown}");
+    }
+
+    #[test]
+    fn test_parse_lambda_with_environment_variables() {
+        let tf_content = r#"
+resource "aws_lambda_function" "worker" {
+  function_name = "env-worker"
+  handler       = "index.handler"
+  runtime       = "python3.12"
+  role          = "arn:aws:iam::role/test"
+  filename      = "worker.zip"
+
+  environment {
+    variables = {
+      TABLE_NAME = "my-table"
+      STAGE      = "dev"
+      DEBUG      = "true"
+    }
+  }
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions.len(), 1);
+        let func = &config.functions[0];
+        assert_eq!(func.environment.get("TABLE_NAME").unwrap(), "my-table");
+        assert_eq!(func.environment.get("STAGE").unwrap(), "dev");
+        assert_eq!(func.environment.get("DEBUG").unwrap(), "true");
+    }
 }
