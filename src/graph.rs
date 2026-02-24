@@ -239,12 +239,14 @@ pub fn build_graph(config: &LambdaformConfig) -> (Vec<GraphNode>, Vec<GraphEdge>
     for esm in &config.event_source_mappings {
         let source_id = match esm.source_type {
             EventSourceType::Sqs => format!("sqs_{}", esm.source_resource),
+            EventSourceType::Sns => format!("sns_{}", esm.source_resource),
             EventSourceType::DynamoDb => format!("dynamodb_{}", esm.source_resource),
             EventSourceType::Kinesis => format!("kinesis_{}", esm.source_resource),
         };
         let target_id = format!("lambda_{}", esm.function_resource);
         let label = match esm.source_type {
             EventSourceType::Sqs => format!("SQS trigger (batch {})", esm.batch_size),
+            EventSourceType::Sns => "SNS subscription".to_string(),
             EventSourceType::DynamoDb => "DynamoDB stream".to_string(),
             EventSourceType::Kinesis => "Kinesis stream".to_string(),
         };

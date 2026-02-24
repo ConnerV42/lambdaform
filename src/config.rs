@@ -215,6 +215,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EventSourceType {
     Sqs,
+    Sns,
     DynamoDb,
     Kinesis,
 }

@@ -1011,6 +1011,11 @@ fn parse_tf_file(
                             config.event_source_mappings.push(esm);
                         }
                     }
+                    "aws_sns_topic_subscription" => {
+                        if let Some(esm) = parse_sns_topic_subscription(resource_name, block)? {
+                            config.event_source_mappings.push(esm);
+                        }
+                    }
                     "aws_lambda_function_url" => {
                         if let Some(furl) = parse_function_url(resource_name, block) {
                             config.function_urls.push(furl);
@@ -2013,6 +2018,45 @@ fn parse_event_source_mapping(
         function_resource,
         batch_size,
         enabled,
+    }))
+}
+
+/// Parse aws_sns_topic_subscription resource (protocol="lambda" → links SNS topic to Lambda)
+fn parse_sns_topic_subscription(
+    name: &str,
+    block: &hcl::Block,
+) -> Result<Option<crate::config::EventSourceMappingConfig>> {
+    let body = &block.body;
+
+    // Only care about Lambda protocol subscriptions
+    let protocol = get_string_attr(body, "protocol").unwrap_or_default();
+    if protocol != "lambda" {
+        return Ok(None);
+    }
+
+    // topic_arn is a traversal like aws_sns_topic.orders.arn
+    let topic_ref = get_traversal_attr(body, "topic_arn").unwrap_or_default();
+    // endpoint is a traversal like aws_lambda_function.handler.arn
+    let endpoint_ref = get_traversal_attr(body, "endpoint").unwrap_or_default();
+
+    if topic_ref.is_empty() || endpoint_ref.is_empty() {
+        tracing::warn!(
+            "SNS topic subscription '{}': missing topic_arn or endpoint reference",
+            name
+        );
+        return Ok(None);
+    }
+
+    let source_resource = extract_resource_name_from_ref(&topic_ref);
+    let function_resource = extract_lambda_name_from_ref(&endpoint_ref);
+
+    Ok(Some(crate::config::EventSourceMappingConfig {
+        resource_name: name.to_string(),
+        source_type: crate::config::EventSourceType::Sns,
+        source_resource,
+        function_resource,
+        batch_size: 1, // SNS delivers one message per invocation by default
+        enabled: true,
     }))
 }
 
@@ -3505,5 +3549,106 @@ resource "aws_apigatewayv2_route" "default" {
             .find(|r| r.path == "$default")
             .expect("Should have $default route");
         assert_eq!(default.function_resource, "default_fn");
+    }
+
+    #[test]
+    fn test_parse_sns_topic_subscription() {
+        let tf_content = r#"
+resource "aws_sns_topic" "alerts" {
+  name = "system-alerts"
+}
+
+resource "aws_lambda_function" "handler" {
+  function_name = "alert-handler"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "handler.zip"
+}
+
+resource "aws_sns_topic_subscription" "alerts_to_handler" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.handler.arn
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.sns_topics.len(), 1);
+        assert_eq!(config.sns_topics[0].name, "system-alerts");
+
+        // SNS subscription should create an event source mapping
+        assert_eq!(config.event_source_mappings.len(), 1);
+        let esm = &config.event_source_mappings[0];
+        assert_eq!(esm.resource_name, "alerts_to_handler");
+        assert_eq!(esm.source_type, crate::config::EventSourceType::Sns);
+        assert_eq!(esm.source_resource, "alerts");
+        assert_eq!(esm.function_resource, "handler");
+        assert!(esm.enabled);
+    }
+
+    #[test]
+    fn test_parse_sns_fanout_multiple_subscriptions() {
+        let tf_content = r#"
+resource "aws_sns_topic" "orders" {
+  name = "orders"
+}
+
+resource "aws_lambda_function" "fulfillment" {
+  function_name = "fulfillment"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "f.zip"
+}
+
+resource "aws_lambda_function" "notifier" {
+  function_name = "notifier"
+  handler       = "notify.handler"
+  runtime       = "python3.12"
+  role          = "arn:aws:iam::role/test"
+  filename      = "n.zip"
+}
+
+resource "aws_sns_topic_subscription" "orders_to_fulfillment" {
+  topic_arn = aws_sns_topic.orders.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.fulfillment.arn
+}
+
+resource "aws_sns_topic_subscription" "orders_to_notifier" {
+  topic_arn = aws_sns_topic.orders.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.notifier.arn
+}
+
+resource "aws_sns_topic_subscription" "orders_email" {
+  topic_arn = aws_sns_topic.orders.arn
+  protocol  = "email"
+  endpoint  = "admin@example.com"
+}
+"#;
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.tf");
+        fs::write(&file_path, tf_content).unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        // Only Lambda-protocol subscriptions should be parsed
+        assert_eq!(config.event_source_mappings.len(), 2);
+        assert_eq!(
+            config.event_source_mappings[0].function_resource,
+            "fulfillment"
+        );
+        assert_eq!(
+            config.event_source_mappings[1].function_resource,
+            "notifier"
+        );
     }
 }
