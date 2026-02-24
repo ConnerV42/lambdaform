@@ -145,7 +145,12 @@ impl AppState {
 
     /// Reload configuration from Terraform files
     pub async fn reload(&self) -> anyhow::Result<()> {
-        let new_config = crate::parser::parse_terraform_dir(&self.source_dir)?;
+        let mut new_config = crate::parser::parse_terraform_dir(&self.source_dir)?;
+
+        // Re-apply lambdaform.yaml overrides (same as initial startup)
+        if let Ok(Some(pc)) = crate::project_config::ProjectConfig::load(&self.source_dir) {
+            pc.apply(&mut new_config);
+        }
 
         let new_router = if let Some(ref gw_resource) = self.gateway_resource {
             // Rebuild router for just this gateway

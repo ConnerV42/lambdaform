@@ -1,0 +1,3 @@
+functions:
+  rust_api:
+    source_path: ../src

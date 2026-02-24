@@ -575,6 +575,9 @@ fn parse_module_dir(
     for (k, v) in variable_overrides {
         resolver.variables.insert(k.clone(), v.clone());
     }
+    // Re-resolve locals now that module variables are available
+    // (from_dir resolves locals before overrides are applied)
+    resolver.resolve_locals();
 
     let mut config = LambdaformConfig::default();
 
@@ -982,7 +985,7 @@ fn parse_tf_file(
                         }
                     }
                     "aws_lambda_layer_version" => {
-                        if let Some(layer) = parse_lambda_layer(resource_name, block)? {
+                        if let Some(layer) = parse_lambda_layer(resource_name, block, resolver)? {
                             config.layers.push(layer);
                         }
                     }
@@ -1812,10 +1815,12 @@ fn parse_lambda_function(
 fn parse_lambda_layer(
     name: &str,
     block: &hcl::Block,
+    resolver: &VariableResolver,
 ) -> Result<Option<crate::config::LayerConfig>> {
     let body = &block.body;
 
-    let layer_name = get_string_attr(body, "layer_name").unwrap_or_else(|| name.to_string());
+    let layer_name =
+        get_string_attr_resolved(body, "layer_name", resolver).unwrap_or_else(|| name.to_string());
 
     // Source path from filename attribute
     let source_path = get_string_attr(body, "filename").map(std::path::PathBuf::from);

@@ -25,3 +25,6 @@ Thumbs.db
 *.dylib
 docs/book/
 __pycache__/
+examples/rust-lambda/src/target/
+examples/*/.lambdaform/
+examples/*/infra/.lambdaform/

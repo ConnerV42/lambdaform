@@ -1240,6 +1240,8 @@ except Exception as e:
         &self,
         raw_event: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        check_runtime_binary(&self.config.runtime)?;
+
         let context = LambdaContext {
             function_name: self.config.function_name.clone(),
             function_version: "$LATEST".to_string(),
