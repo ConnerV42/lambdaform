@@ -420,4 +420,200 @@ plugins:
         assert_eq!(config.plugins.len(), 1);
         assert_eq!(config.plugins[0].name, "s3-local");
     }
+
+    fn make_lambda(resource: &str, function: &str) -> crate::config::LambdaConfig {
+        crate::config::LambdaConfig {
+            resource_name: resource.into(),
+            function_name: function.into(),
+            handler: "index.handler".into(),
+            runtime: crate::config::Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: HashMap::new(),
+            timeout: 3,
+            memory_size: 128,
+            layers: vec![],
+            architecture: crate::config::Architecture::default(),
+        }
+    }
+
+    fn make_config(funcs: Vec<crate::config::LambdaConfig>) -> crate::config::LambdaformConfig {
+        crate::config::LambdaformConfig {
+            functions: funcs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_apply_per_function_override_by_resource_name() {
+        let yaml = r#"
+functions:
+  api_handler:
+    timeout: 60
+    memory_size: 512
+    handler: src/main.handle
+"#;
+        let proj: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut config = make_config(vec![make_lambda("api_handler", "my-api")]);
+        proj.apply(&mut config);
+        assert_eq!(config.functions[0].timeout, 60);
+        assert_eq!(config.functions[0].memory_size, 512);
+        assert_eq!(config.functions[0].handler, "src/main.handle");
+    }
+
+    #[test]
+    fn test_apply_per_function_override_by_function_name() {
+        let yaml = r#"
+functions:
+  my-api:
+    timeout: 120
+"#;
+        let proj: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut config = make_config(vec![make_lambda("api_handler", "my-api")]);
+        proj.apply(&mut config);
+        assert_eq!(config.functions[0].timeout, 120);
+    }
+
+    #[test]
+    fn test_apply_env_precedence() {
+        // Terraform env > global yaml env; per-function yaml env overrides all
+        let yaml = r#"
+environment:
+  GLOBAL_VAR: global_val
+  SHARED: from_global
+functions:
+  fn1:
+    environment:
+      SHARED: from_per_function
+      FN_VAR: fn_val
+"#;
+        let proj: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut func = make_lambda("fn1", "fn1-name");
+        func.environment.insert("TF_VAR".into(), "tf_val".into());
+        func.environment.insert("SHARED".into(), "from_tf".into());
+        let mut config = make_config(vec![func]);
+        proj.apply(&mut config);
+        let env = &config.functions[0].environment;
+        // Terraform value kept (global uses entry().or_insert)
+        assert_eq!(env["TF_VAR"], "tf_val");
+        assert_eq!(env["GLOBAL_VAR"], "global_val");
+        // Per-function override wins over everything (uses insert)
+        assert_eq!(env["SHARED"], "from_per_function");
+        assert_eq!(env["FN_VAR"], "fn_val");
+    }
+
+    #[test]
+    fn test_apply_source_path_override() {
+        let yaml = r#"
+functions:
+  worker:
+    source_path: ./custom/path
+"#;
+        let proj: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut config = make_config(vec![make_lambda("worker", "worker-fn")]);
+        proj.apply(&mut config);
+        assert_eq!(
+            config.functions[0].source_path,
+            Some(PathBuf::from("./custom/path"))
+        );
+    }
+
+    #[test]
+    fn test_apply_no_overrides_leaves_unchanged() {
+        let yaml = "{}";
+        let proj: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut config = make_config(vec![make_lambda("fn1", "fn1-name")]);
+        config.functions[0].timeout = 30;
+        config.functions[0].memory_size = 256;
+        proj.apply(&mut config);
+        assert_eq!(config.functions[0].timeout, 30);
+        assert_eq!(config.functions[0].memory_size, 256);
+    }
+
+    #[test]
+    fn test_apply_multiple_functions() {
+        let yaml = r#"
+environment:
+  STAGE: dev
+functions:
+  fn_a:
+    timeout: 10
+  fn_b:
+    timeout: 20
+"#;
+        let proj: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut config = make_config(vec![
+            make_lambda("fn_a", "func-a"),
+            make_lambda("fn_b", "func-b"),
+            make_lambda("fn_c", "func-c"),
+        ]);
+        proj.apply(&mut config);
+        assert_eq!(config.functions[0].timeout, 10);
+        assert_eq!(config.functions[1].timeout, 20);
+        assert_eq!(config.functions[2].timeout, 3); // unchanged
+                                                    // All get global env
+        for f in &config.functions {
+            assert_eq!(f.environment["STAGE"], "dev");
+        }
+    }
+
+    #[test]
+    fn test_load_nonexistent_dir() {
+        let result = ProjectConfig::load(Path::new("/nonexistent/dir"));
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_load_yaml_extension() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lambdaform.yaml"), "port: 5000\n").unwrap();
+        let config = ProjectConfig::load(dir.path()).unwrap().unwrap();
+        assert_eq!(config.port, Some(5000));
+    }
+
+    #[test]
+    fn test_load_yml_extension() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lambdaform.yml"), "port: 6000\n").unwrap();
+        let config = ProjectConfig::load(dir.path()).unwrap().unwrap();
+        assert_eq!(config.port, Some(6000));
+    }
+
+    #[test]
+    fn test_load_yaml_preferred_over_yml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lambdaform.yaml"), "port: 7000\n").unwrap();
+        std::fs::write(dir.path().join("lambdaform.yml"), "port: 8000\n").unwrap();
+        let config = ProjectConfig::load(dir.path()).unwrap().unwrap();
+        assert_eq!(config.port, Some(7000)); // .yaml wins
+    }
+
+    #[test]
+    fn test_load_invalid_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lambdaform.yaml"), "port: [invalid").unwrap();
+        let result = ProjectConfig::load(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cors_defaults() {
+        let cors = CorsConfig::default();
+        assert_eq!(cors.allow_origins, vec!["*"]);
+        assert!(!cors.allow_credentials);
+        assert!(cors.max_age.is_none());
+    }
+
+    #[test]
+    fn test_unknown_fields_allowed() {
+        // deny_unknown_fields was removed (M4) — verify unknown keys don't error
+        let yaml = r#"
+port: 3000
+future_field: whatever
+nested:
+  unknown: true
+"#;
+        let result: Result<ProjectConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+    }
 }
