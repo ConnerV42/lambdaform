@@ -13,6 +13,55 @@ use lambdaform::parser;
 use lambdaform::project_config;
 use lambdaform::runtime;
 use lambdaform::server;
+
+/// Detected Infrastructure-as-Code tool
+#[derive(Debug, Clone, PartialEq)]
+enum IacTool {
+    Terraform(String), // version
+    OpenTofu(String),  // version
+}
+
+/// Check for terraform/tofu binary availability and return which is found.
+/// If neither is found, prints a helpful warning (not an error — Lambdaform
+/// doesn't require the binary, but users need it for `init`/`plan`/`apply`).
+fn detect_iac_tool() -> Option<IacTool> {
+    // Check OpenTofu first (preferred open-source fork)
+    if which::which("tofu").is_ok() {
+        let version = std::process::Command::new("tofu")
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
+        return Some(IacTool::OpenTofu(version));
+    }
+
+    if which::which("terraform").is_ok() {
+        let version = std::process::Command::new("terraform")
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
+        return Some(IacTool::Terraform(version));
+    }
+
+    None
+}
+
+/// Print a warning when no IaC tool is detected.
+fn print_iac_not_found_warning() {
+    eprintln!("⚠️  Neither Terraform nor OpenTofu found on PATH.");
+    eprintln!("   Lambdaform parses .tf files directly — no IaC binary needed to start.");
+    eprintln!("   However, you'll need one for `init`, `plan`, and `apply`.");
+    eprintln!();
+    eprintln!("   Install one of:");
+    eprintln!("     • OpenTofu (recommended): https://opentofu.org/docs/intro/install/");
+    eprintln!("     • Terraform:              https://developer.hashicorp.com/terraform/install");
+    eprintln!();
+}
 use lambdaform::stepfunctions;
 use lambdaform::trigger;
 use lambdaform::websocket;
@@ -436,6 +485,13 @@ async fn cmd_start(
          └─────────────────────────────────────────┘\n",
         version
     );
+
+    // Check for IaC tool availability
+    match detect_iac_tool() {
+        Some(IacTool::OpenTofu(v)) => println!("🔧 IaC tool: {}", v),
+        Some(IacTool::Terraform(v)) => println!("🔧 IaC tool: {}", v),
+        None => print_iac_not_found_warning(),
+    }
 
     println!("📂 Loading Terraform from: {}", dir.display());
 
@@ -1147,11 +1203,21 @@ fn cmd_validate(dir: PathBuf, var_files: Vec<PathBuf>) -> anyhow::Result<()> {
         .collect();
 
     if tf_files.is_empty() {
-        anyhow::bail!(
+        let mut msg = format!(
             "No .tf files found in '{}'.\n\
-             Hint: Run this command from your Terraform project root.",
+             Hint: Run this command from your Terraform/OpenTofu project root.",
             dir.display()
         );
+        if detect_iac_tool().is_none() {
+            msg.push_str(
+                "\n\nNeither `terraform` nor `tofu` was found on your PATH.\n\
+                 Install one of:\n  \
+                 • OpenTofu (recommended): https://opentofu.org/docs/intro/install/\n  \
+                 • Terraform:              https://developer.hashicorp.com/terraform/install",
+            );
+        }
+        msg.push_str("\n\nTry: lambdaform init  — to set up a new project");
+        anyhow::bail!(msg);
     }
 
     println!("   Found {} .tf file(s)", tf_files.len());
