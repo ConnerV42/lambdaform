@@ -244,7 +244,6 @@ fn test_parse_http_api_fixture() {
 
 #[test]
 fn test_init_generates_config() {
-    use assert_cmd::Command;
     use std::fs;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -257,8 +256,7 @@ fn test_init_generates_config() {
         }
     }
 
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["init", "--dir", tmp.path().to_str().unwrap(), "--yes"])
         .assert()
         .success()
@@ -274,12 +272,9 @@ fn test_init_generates_config() {
 
 #[test]
 fn test_init_no_tf_files() {
-    use assert_cmd::Command;
-
     let tmp = tempfile::tempdir().unwrap();
 
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["init", "--dir", tmp.path().to_str().unwrap(), "--yes"])
         .assert()
         .success()
@@ -637,10 +632,7 @@ async fn test_multi_gateway_both_parse() {
 
 #[test]
 fn test_cli_version() {
-    use assert_cmd::Command;
-
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["--version"])
         .assert()
         .success()
@@ -651,11 +643,8 @@ fn test_cli_version() {
 
 #[test]
 fn test_cli_config() {
-    use assert_cmd::Command;
-
     let dir = fixture_dir("simple-node");
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["config", "--dir", dir.to_str().unwrap()])
         .assert()
         .success();
@@ -665,11 +654,8 @@ fn test_cli_config() {
 
 #[test]
 fn test_cli_graph_ascii() {
-    use assert_cmd::Command;
-
     let dir = fixture_dir("simple-node");
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["graph", "--dir", dir.to_str().unwrap()])
         .assert()
         .success();
@@ -677,11 +663,8 @@ fn test_cli_graph_ascii() {
 
 #[test]
 fn test_cli_graph_dot() {
-    use assert_cmd::Command;
-
     let dir = fixture_dir("simple-node");
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["graph", "--dir", dir.to_str().unwrap(), "--format", "dot"])
         .assert()
         .success()
@@ -690,11 +673,8 @@ fn test_cli_graph_dot() {
 
 #[test]
 fn test_cli_graph_json() {
-    use assert_cmd::Command;
-
     let dir = fixture_dir("simple-node");
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["graph", "--dir", dir.to_str().unwrap(), "--format", "json"])
         .assert()
         .success();
@@ -704,11 +684,8 @@ fn test_cli_graph_json() {
 
 #[test]
 fn test_cli_cost() {
-    use assert_cmd::Command;
-
     let dir = fixture_dir("simple-node");
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["cost", "--dir", dir.to_str().unwrap()])
         .assert()
         .success();
@@ -718,11 +695,8 @@ fn test_cli_cost() {
 
 #[test]
 fn test_cli_validate() {
-    use assert_cmd::Command;
-
     let dir = fixture_dir("simple-node");
-    Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lambdaform")
         .args(["validate", "--dir", dir.to_str().unwrap()])
         .assert()
         .success();
