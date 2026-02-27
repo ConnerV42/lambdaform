@@ -158,7 +158,11 @@ pub fn estimate_costs(
     }
 
     // Sort by total cost descending
-    function_costs.sort_by(|a, b| b.total_cost.partial_cmp(&a.total_cost).unwrap());
+    function_costs.sort_by(|a, b| {
+        b.total_cost
+            .partial_cmp(&a.total_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let total_invocations: u64 = function_costs.iter().map(|f| f.invocations).sum();
     let total_gb_seconds: f64 = function_costs.iter().map(|f| f.gb_seconds).sum();

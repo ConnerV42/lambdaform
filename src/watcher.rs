@@ -198,4 +198,77 @@ mod tests {
         let change = process_event(&event, &[]);
         assert!(matches!(change, Some(FileChange::Terraform(_))));
     }
+
+    #[test]
+    fn test_mjs_cjs_detection() {
+        for ext in &["mjs", "cjs"] {
+            let event = DebouncedEvent {
+                path: std::path::PathBuf::from(format!("/project/util.{ext}")),
+                kind: notify_debouncer_mini::DebouncedEventKind::Any,
+            };
+            let change = process_event(&event, &[]);
+            assert!(
+                matches!(change, Some(FileChange::Source(_))),
+                "Expected Source for .{ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_extension_ignored() {
+        let event = DebouncedEvent {
+            path: std::path::PathBuf::from("/project/readme.md"),
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
+        };
+        assert!(process_event(&event, &[]).is_none());
+    }
+
+    #[test]
+    fn test_no_extension_ignored() {
+        let event = DebouncedEvent {
+            path: std::path::PathBuf::from("/project/Makefile"),
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
+        };
+        assert!(process_event(&event, &[]).is_none());
+    }
+
+    #[test]
+    fn test_multiple_ignore_patterns() {
+        let patterns = vec![
+            "node_modules".to_string(),
+            ".git".to_string(),
+            "__pycache__".to_string(),
+        ];
+        for dir in &["node_modules", ".git", "__pycache__"] {
+            let event = DebouncedEvent {
+                path: std::path::PathBuf::from(format!("/project/{dir}/file.js")),
+                kind: notify_debouncer_mini::DebouncedEventKind::Any,
+            };
+            assert!(
+                process_event(&event, &patterns).is_none(),
+                "{dir} should be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn test_terraform_dir_ignored() {
+        let event = DebouncedEvent {
+            path: std::path::PathBuf::from("/project/.terraform/providers/main.tf"),
+            kind: notify_debouncer_mini::DebouncedEventKind::Any,
+        };
+        let patterns = vec![".terraform".to_string()];
+        assert!(process_event(&event, &patterns).is_none());
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = WatchConfig::default();
+        assert!(config.watch_paths.is_empty());
+        assert_eq!(config.debounce_ms, 100);
+        assert!(config.ignore_patterns.contains(&"node_modules".to_string()));
+        assert!(config.ignore_patterns.contains(&".git".to_string()));
+        assert!(config.ignore_patterns.contains(&"__pycache__".to_string()));
+        assert!(config.ignore_patterns.contains(&".terraform".to_string()));
+    }
 }
