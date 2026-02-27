@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.0.3 — Dogfooding & Hardening (2026-02-27)
+
+**Bug fixes:**
+- Fix base64 response body decoding in main API Gateway handler
+- Fix v1 REST API route assignment to correct gateway by rest_api_id
+- Fix runtime binary check on v2 invoke path (missing check for node/python)
+- Fix WebSocket $default route mapping and @connections port display
+- Fix v2 multi-integration route resolution (routes piling onto first gateway)
+- Fix multi-method parsing (all HTTP methods on same API Gateway resource)
+- Parse aws_sns_topic_subscription for SNS trigger support
+- NaN-safe cost sorting (no panic on edge-case division results)
+
+**Features:**
+- Detect Terraform/OpenTofu on startup with helpful install guidance
+- Inject standard AWS Lambda environment variables (AWS_REGION, AWS_LAMBDA_FUNCTION_NAME, etc.)
+
+**Dogfooding examples (18 total):**
+- crud-api-node, crud-api-python, multi-function, api-gateway-v2
+- websocket-chat, sqs-processor, sns-fanout, step-functions, authorizer-flow
+- go-lambda, rust-lambda, terraform-modules, monorepo, large-payload
+- Docker Compose examples (DynamoDB Local, full-stack)
+
+**Documentation:**
+- Troubleshooting guide and FAQ pages
+- CONTRIBUTING.md full architecture guide
+- Fix SUMMARY.md — link all 33 doc pages (was only 3)
+- READMEs for monorepo, terraform-modules, plugins examples
+
+**Test coverage:**
+- 173 new tests across all modules (377 total, up from 204)
+- New coverage: parser helpers, router edge cases, step functions, pool concurrency, cost/server/plugin modules, watcher edge cases, integration tests for modules/CLI/layers/DynamoDB/WebSocket
+
 ## v1.0.2 — Polish & Test Coverage (2026-02-22)
 
 **Features:**
