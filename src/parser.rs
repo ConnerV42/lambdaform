@@ -2346,7 +2346,8 @@ fn extract_environment_resolved(
                                                 }),
                                         )
                                     }
-                                    _ => None,
+                                    // FuncCall, Number, Bool, Array, Object, etc.
+                                    other => expr_to_string(other),
                                 };
                                 if let Some(val) = resolved_value {
                                     env.insert(k.to_string(), val);
@@ -4285,5 +4286,136 @@ resource "aws_lambda_function" "api" {
         assert_eq!(rest_gws[0].name, "MyRestAPI");
         assert_eq!(rest_gws[0].routes.len(), 1);
         assert_eq!(rest_gws[0].routes[0].path, "/users");
+    }
+
+    // ---- Terraform function evaluation tests ----
+    // These test expr_to_string / expr_func_call_to_string through the full parse pipeline
+    // by putting function calls in Lambda environment variables.
+
+    /// Helper: write a .tf file that puts `expr` in an env var and parse it.
+    fn parse_env_var_expr(expr: &str) -> Option<String> {
+        let dir = TempDir::new().unwrap();
+        let tf = format!(
+            r#"
+resource "aws_lambda_function" "test" {{
+  function_name = "test-func"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::123:role/test"
+
+  environment {{
+    variables = {{
+      RESULT = {expr}
+    }}
+  }}
+}}
+"#
+        );
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        config.functions[0].environment.get("RESULT").cloned()
+    }
+
+    #[test]
+    fn test_tf_func_jsonencode_object() {
+        let val = parse_env_var_expr(r#"jsonencode({ key = "value", num = 42 })"#);
+        assert!(val.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(&val.unwrap()).unwrap();
+        assert_eq!(parsed["key"], "value");
+        assert_eq!(parsed["num"], 42);
+    }
+
+    #[test]
+    fn test_tf_func_jsonencode_array() {
+        let val = parse_env_var_expr(r#"jsonencode(["a", "b", "c"])"#);
+        assert!(val.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(&val.unwrap()).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_tf_func_jsonencode_nested() {
+        let val =
+            parse_env_var_expr(r#"jsonencode({ outer = { inner = "deep" }, list = [1, 2] })"#);
+        assert!(val.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(&val.unwrap()).unwrap();
+        assert_eq!(parsed["outer"]["inner"], "deep");
+        assert_eq!(parsed["list"][0], 1);
+    }
+
+    #[test]
+    fn test_tf_func_upper() {
+        let val = parse_env_var_expr(r#"upper("hello")"#);
+        assert_eq!(val, Some("HELLO".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_lower() {
+        let val = parse_env_var_expr(r#"lower("WORLD")"#);
+        assert_eq!(val, Some("world".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_trimspace() {
+        let val = parse_env_var_expr(r#"trimspace("  padded  ")"#);
+        assert_eq!(val, Some("padded".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_tostring() {
+        let val = parse_env_var_expr(r#"tostring("passthrough")"#);
+        assert_eq!(val, Some("passthrough".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_replace() {
+        let val = parse_env_var_expr(r#"replace("hello-world", "-", "_")"#);
+        assert_eq!(val, Some("hello_world".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_coalesce_first_nonempty() {
+        let val = parse_env_var_expr(r#"coalesce("first", "second")"#);
+        assert_eq!(val, Some("first".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_unknown_returns_none() {
+        // Unknown functions can't be resolved — env var should be absent or empty
+        let val = parse_env_var_expr(r#"some_unknown_func("arg")"#);
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn test_tf_expr_number_in_env() {
+        let val = parse_env_var_expr("42");
+        assert_eq!(val, Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_tf_expr_bool_in_env() {
+        let val = parse_env_var_expr("true");
+        assert_eq!(val, Some("true".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_jsonencode_empty_object() {
+        let val = parse_env_var_expr(r#"jsonencode({})"#);
+        assert_eq!(val, Some("{}".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_jsonencode_empty_array() {
+        let val = parse_env_var_expr(r#"jsonencode([])"#);
+        assert_eq!(val, Some("[]".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_jsonencode_booleans() {
+        let val = parse_env_var_expr(r#"jsonencode({ enabled = true, debug = false })"#);
+        assert!(val.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(&val.unwrap()).unwrap();
+        assert_eq!(parsed["enabled"], true);
+        assert_eq!(parsed["debug"], false);
     }
 }
