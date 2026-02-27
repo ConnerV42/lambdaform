@@ -524,4 +524,118 @@ mod tests {
         // Unregistered method
         assert!(router.match_request(&HttpMethod::Put, "/items").is_none());
     }
+
+    #[test]
+    fn test_trailing_slash_no_match() {
+        // Strict path matching: /users should NOT match /users/
+        let gw = make_gateway(vec![make_test_route(HttpMethod::Get, "/users", "list_fn")]);
+        let funcs = vec![make_test_lambda("list_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router.match_request(&HttpMethod::Get, "/users").is_some());
+        // Trailing slash is a different path
+        assert!(router.match_request(&HttpMethod::Get, "/users/").is_none());
+    }
+
+    #[test]
+    fn test_url_encoded_path_param() {
+        // URL-encoded values should be captured as-is (decoding is caller's job)
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/files/{name}",
+            "get_file",
+        )]);
+        let funcs = vec![make_test_lambda("get_file")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router
+            .match_request(&HttpMethod::Get, "/files/hello%20world")
+            .unwrap();
+        assert_eq!(
+            m.path_params.get("name"),
+            Some(&"hello%20world".to_string())
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_params() {
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/a/{b}/c/{d}/e/{f}",
+            "deep_fn",
+        )]);
+        let funcs = vec![make_test_lambda("deep_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router
+            .match_request(&HttpMethod::Get, "/a/1/c/2/e/3")
+            .unwrap();
+        assert_eq!(m.path_params.get("b"), Some(&"1".to_string()));
+        assert_eq!(m.path_params.get("d"), Some(&"2".to_string()));
+        assert_eq!(m.path_params.get("f"), Some(&"3".to_string()));
+        // Wrong depth shouldn't match
+        assert!(router.match_request(&HttpMethod::Get, "/a/1/c/2").is_none());
+    }
+
+    #[test]
+    fn test_proxy_plus_captures_empty_suffix() {
+        // {proxy+} with just the prefix should still match (captures empty string)
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Any,
+            "/api/{proxy+}",
+            "proxy_fn",
+        )]);
+        let funcs = vec![make_test_lambda("proxy_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        // Single segment after prefix
+        let m = router.match_request(&HttpMethod::Get, "/api/x").unwrap();
+        assert_eq!(m.path_params.get("proxy"), Some(&"x".to_string()));
+
+        // Empty after prefix — .* matches empty string
+        let m = router.match_request(&HttpMethod::Get, "/api/");
+        assert!(m.is_some());
+    }
+
+    #[test]
+    fn test_special_chars_in_literal_segments() {
+        // Regex special chars in literal path segments should be escaped
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/v1.0/items",
+            "v1_fn",
+        )]);
+        let funcs = vec![make_test_lambda("v1_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router
+            .match_request(&HttpMethod::Get, "/v1.0/items")
+            .is_some());
+        // The dot should NOT match any character
+        assert!(router
+            .match_request(&HttpMethod::Get, "/v1X0/items")
+            .is_none());
+    }
+
+    #[test]
+    fn test_non_lambda_authorizer_not_attached() {
+        // Cognito/JWT authorizers (non-Lambda) should not produce authorizer_function
+        let route = RouteConfig {
+            method: HttpMethod::Get,
+            path: "/protected".to_string(),
+            function_resource: "handler".to_string(),
+            authorizer: Some(AuthorizerConfig {
+                auth_type: AuthorizerType::Cognito,
+                function_resource: None,
+            }),
+        };
+        let gw = make_gateway(vec![route]);
+        let funcs = vec![make_test_lambda("handler")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router
+            .match_request(&HttpMethod::Get, "/protected")
+            .unwrap();
+        assert!(m.authorizer_function.is_none());
+    }
 }
