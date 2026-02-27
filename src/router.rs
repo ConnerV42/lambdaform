@@ -618,6 +618,129 @@ mod tests {
     }
 
     #[test]
+    fn test_case_sensitive_paths() {
+        // API Gateway paths are case-sensitive
+        let gw = make_gateway(vec![make_test_route(HttpMethod::Get, "/Users", "fn1")]);
+        let funcs = vec![make_test_lambda("fn1")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router.match_request(&HttpMethod::Get, "/Users").is_some());
+        assert!(router.match_request(&HttpMethod::Get, "/users").is_none());
+        assert!(router.match_request(&HttpMethod::Get, "/USERS").is_none());
+    }
+
+    #[test]
+    fn test_hyphenated_and_underscored_paths() {
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/my-resource/sub_path",
+            "fn1",
+        )]);
+        let funcs = vec![make_test_lambda("fn1")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router
+            .match_request(&HttpMethod::Get, "/my-resource/sub_path")
+            .is_some());
+    }
+
+    #[test]
+    fn test_proxy_captures_nested_slashes() {
+        // {proxy+} should capture multi-segment paths
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/api/{proxy+}",
+            "proxy_fn",
+        )]);
+        let funcs = vec![make_test_lambda("proxy_fn")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router
+            .match_request(&HttpMethod::Get, "/api/a/b/c/d")
+            .unwrap();
+        assert_eq!(m.path_params.get("proxy"), Some(&"a/b/c/d".to_string()));
+    }
+
+    #[test]
+    fn test_param_with_special_values() {
+        // Path params can contain dots, hyphens, underscores
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Get,
+            "/files/{filename}",
+            "fn1",
+        )]);
+        let funcs = vec![make_test_lambda("fn1")];
+        let router = Router::new(&[gw], &funcs);
+
+        let m = router
+            .match_request(&HttpMethod::Get, "/files/report-2026.pdf")
+            .unwrap();
+        assert_eq!(
+            m.path_params.get("filename"),
+            Some(&"report-2026.pdf".to_string())
+        );
+
+        let m = router
+            .match_request(&HttpMethod::Get, "/files/my_file_v2")
+            .unwrap();
+        assert_eq!(
+            m.path_params.get("filename"),
+            Some(&"my_file_v2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_exact_route_beats_nothing_when_ordered_first() {
+        // Routes match in order — first match wins
+        let gw = make_gateway(vec![
+            make_test_route(HttpMethod::Get, "/items/special", "special_fn"),
+            make_test_route(HttpMethod::Get, "/items/{id}", "generic_fn"),
+        ]);
+        let funcs = vec![
+            make_test_lambda("special_fn"),
+            make_test_lambda("generic_fn"),
+        ];
+        let router = Router::new(&[gw], &funcs);
+
+        // Exact match takes priority when listed first
+        let m = router
+            .match_request(&HttpMethod::Get, "/items/special")
+            .unwrap();
+        assert_eq!(m.function.resource_name, "special_fn");
+
+        // Other paths hit the param route
+        let m = router
+            .match_request(&HttpMethod::Get, "/items/123")
+            .unwrap();
+        assert_eq!(m.function.resource_name, "generic_fn");
+    }
+
+    #[test]
+    fn test_head_method_matching() {
+        let gw = make_gateway(vec![make_test_route(HttpMethod::Head, "/health", "fn1")]);
+        let funcs = vec![make_test_lambda("fn1")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router.match_request(&HttpMethod::Head, "/health").is_some());
+        assert!(router.match_request(&HttpMethod::Get, "/health").is_none());
+    }
+
+    #[test]
+    fn test_options_method_matching() {
+        let gw = make_gateway(vec![make_test_route(
+            HttpMethod::Options,
+            "/preflight",
+            "fn1",
+        )]);
+        let funcs = vec![make_test_lambda("fn1")];
+        let router = Router::new(&[gw], &funcs);
+
+        assert!(router
+            .match_request(&HttpMethod::Options, "/preflight")
+            .is_some());
+    }
+
+    #[test]
     fn test_non_lambda_authorizer_not_attached() {
         // Cognito/JWT authorizers (non-Lambda) should not produce authorizer_function
         let route = RouteConfig {

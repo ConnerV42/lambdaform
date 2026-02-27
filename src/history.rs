@@ -312,6 +312,85 @@ mod tests {
         assert_eq!(loaded.len(), 1000);
     }
 
+    #[tokio::test]
+    async fn test_multiple_concurrent_records() {
+        let dir = TempDir::new().unwrap();
+        let recorder = HistoryRecorder::new(dir.path()).unwrap();
+
+        // Record several entries rapidly
+        for i in 0..10 {
+            let mut entry = make_entry(200);
+            entry.id = format!("concurrent-{}", i);
+            entry.path = format!("/api/item/{}", i);
+            recorder.record(entry).await;
+        }
+
+        assert_eq!(recorder.count().await, 10);
+        let loaded = load_history(recorder.file_path()).unwrap();
+        assert_eq!(loaded.len(), 10);
+        // Verify ordering preserved
+        assert_eq!(loaded[0].id, "concurrent-0");
+        assert_eq!(loaded[9].id, "concurrent-9");
+    }
+
+    #[test]
+    fn test_format_entry_redirect_icon() {
+        // 3xx should show redirect icon
+        let formatted = format_entry(&make_entry(302), 0);
+        assert!(formatted.contains("↪️"));
+        assert!(formatted.contains("302"));
+    }
+
+    #[test]
+    fn test_format_entry_with_headers() {
+        let mut entry = make_entry(200);
+        entry.headers = Some(HashMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("authorization".to_string(), "Bearer xxx".to_string()),
+        ]));
+        // Headers should serialize without error
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.headers.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_load_history_whitespace_only_lines() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ws.jsonl");
+        let good = serde_json::to_string(&make_entry(200)).unwrap();
+        std::fs::write(&path, format!("{}\n  \n\n{}\n", good, good)).unwrap();
+        let entries = load_history(&path).unwrap();
+        assert_eq!(entries.len(), 2); // blank lines skipped
+    }
+
+    #[tokio::test]
+    async fn test_recorder_creates_dotlambdaform_dir() {
+        let dir = TempDir::new().unwrap();
+        let lf_dir = dir.path().join(".lambdaform");
+        assert!(!lf_dir.exists());
+        let _recorder = HistoryRecorder::new(dir.path()).unwrap();
+        assert!(lf_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_rotation_keeps_exactly_max() {
+        let dir = TempDir::new().unwrap();
+        let lf_dir = dir.path().join(".lambdaform");
+        std::fs::create_dir_all(&lf_dir).unwrap();
+        let path = lf_dir.join("history.jsonl");
+
+        // Write exactly 1000 — should NOT rotate
+        let entry = make_entry(200);
+        let line = serde_json::to_string(&entry).unwrap();
+        let content: String = (0..1000).map(|_| format!("{}\n", line)).collect();
+        std::fs::write(&path, &content).unwrap();
+
+        let _recorder = HistoryRecorder::new(dir.path()).unwrap();
+        let loaded = load_history(&path).unwrap();
+        assert_eq!(loaded.len(), 1000); // no rotation needed
+    }
+
     #[test]
     fn test_entry_serialization_roundtrip() {
         let entry = HistoryEntry {
