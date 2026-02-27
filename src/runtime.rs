@@ -427,9 +427,38 @@ impl FunctionExecutor {
         )
     }
 
-    /// Build environment variables with layer paths added to NODE_PATH/PYTHONPATH
+    /// Build environment variables with layer paths added to NODE_PATH/PYTHONPATH.
+    /// Also injects standard AWS Lambda environment variables that the real runtime provides.
     fn env_with_layers(&self) -> HashMap<String, String> {
         let mut env = self.config.environment.clone();
+
+        // Inject standard AWS Lambda environment variables (only if not already set by user)
+        let defaults = [
+            (
+                "AWS_LAMBDA_FUNCTION_NAME",
+                self.config.function_name.clone(),
+            ),
+            (
+                "AWS_LAMBDA_FUNCTION_MEMORY_SIZE",
+                self.config.memory_size.to_string(),
+            ),
+            ("AWS_LAMBDA_FUNCTION_VERSION", "$LATEST".to_string()),
+            ("AWS_REGION", "us-east-1".to_string()),
+            ("AWS_DEFAULT_REGION", "us-east-1".to_string()),
+            (
+                "LAMBDA_TASK_ROOT",
+                self.source_dir.to_string_lossy().to_string(),
+            ),
+            ("_HANDLER", self.config.handler.clone()),
+            ("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001".to_string()),
+            (
+                "AWS_EXECUTION_ENV",
+                format!("AWS_Lambda_{}", self.config.runtime.as_str()),
+            ),
+        ];
+        for (key, value) in defaults {
+            env.entry(key.to_string()).or_insert(value);
+        }
 
         if self.layer_paths.is_empty() {
             return env;
@@ -2214,5 +2243,68 @@ mod tests {
         let rc = &json["requestContext"];
         assert_eq!(rc["connectedAt"], 1699999999000u64);
         assert_eq!(rc["requestTimeEpoch"], 1700000000000u64);
+    }
+
+    #[test]
+    fn test_aws_lambda_env_vars_injected() {
+        use crate::config::Architecture;
+        let dir = TempDir::new().unwrap();
+        let config = LambdaConfig {
+            resource_name: "my_func".to_string(),
+            function_name: "my-function".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: HashMap::new(),
+            timeout: 30,
+            memory_size: 256,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+        let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
+        let env = executor.env_with_layers();
+
+        assert_eq!(env["AWS_LAMBDA_FUNCTION_NAME"], "my-function");
+        assert_eq!(env["AWS_LAMBDA_FUNCTION_MEMORY_SIZE"], "256");
+        assert_eq!(env["AWS_LAMBDA_FUNCTION_VERSION"], "$LATEST");
+        assert_eq!(env["AWS_REGION"], "us-east-1");
+        assert_eq!(env["AWS_DEFAULT_REGION"], "us-east-1");
+        assert_eq!(env["_HANDLER"], "index.handler");
+        assert_eq!(env["AWS_EXECUTION_ENV"], "AWS_Lambda_nodejs20.x");
+        assert!(env.contains_key("LAMBDA_TASK_ROOT"));
+    }
+
+    #[test]
+    fn test_user_env_vars_override_defaults() {
+        use crate::config::Architecture;
+        let dir = TempDir::new().unwrap();
+        let mut user_env = HashMap::new();
+        user_env.insert("AWS_REGION".to_string(), "eu-west-1".to_string());
+        user_env.insert(
+            "AWS_LAMBDA_FUNCTION_NAME".to_string(),
+            "custom-name".to_string(),
+        );
+        let config = LambdaConfig {
+            resource_name: "func".to_string(),
+            function_name: "auto-name".to_string(),
+            handler: "handler.main".to_string(),
+            runtime: Runtime::Python312,
+            source_path: None,
+            filename_ref: None,
+            environment: user_env,
+            timeout: 30,
+            memory_size: 128,
+            layers: vec![],
+            architecture: Architecture::default(),
+        };
+        let executor = FunctionExecutor::new(config, dir.path().to_path_buf());
+        let env = executor.env_with_layers();
+
+        // User-provided values should NOT be overridden
+        assert_eq!(env["AWS_REGION"], "eu-west-1");
+        assert_eq!(env["AWS_LAMBDA_FUNCTION_NAME"], "custom-name");
+        // But other defaults should still be set
+        assert_eq!(env["AWS_LAMBDA_FUNCTION_VERSION"], "$LATEST");
     }
 }
