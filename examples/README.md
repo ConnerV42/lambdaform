@@ -29,6 +29,13 @@ Each example is a complete, runnable project. Start any of them with `lambdaform
 | [go-lambda](go-lambda/) | Go REST API | Go (provided.al2023) |
 | [rust-lambda](rust-lambda/) | Rust REST API | Rust (provided.al2023) |
 
+## Docker Compose
+
+| Example | Description | Services |
+|---------|-------------|----------|
+| [docker-compose-dynamodb](docker-compose-dynamodb/) | CRUD API + DynamoDB Local | DynamoDB Local |
+| [docker-compose-fullstack](docker-compose-fullstack/) | File upload API + DynamoDB + S3 | DynamoDB Local, LocalStack S3 |
+
 ## Edge Cases
 
 | Example | Description |
