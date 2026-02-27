@@ -814,3 +814,104 @@ async fn test_multi_method_same_resource() {
     let body = body_json(resp).await;
     assert_eq!(body["method"], "DELETE");
 }
+
+// ─── Module Variable & Locals Resolution Tests ─────────────────────────────
+
+#[tokio::test]
+async fn test_parse_module_var_locals() {
+    let dir = fixture_dir("module-var-locals");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    // Child module should produce a function with interpolated name
+    assert!(
+        !config.functions.is_empty(),
+        "Should find functions in child module"
+    );
+    let func = &config.functions[0];
+    // The function name should have the interpolated prefix
+    assert!(
+        func.function_name.contains("myapp") || func.function_name.contains("staging"),
+        "Function name '{}' should contain interpolated variable values",
+        func.function_name
+    );
+}
+
+// ─── CLI Subcommand Tests ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_cli_help() {
+    let mut cmd = assert_cmd::Command::cargo_bin("lambdaform").unwrap();
+    let output = cmd.arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("start"),
+        "Help should mention 'start' command"
+    );
+    assert!(
+        stdout.contains("invoke"),
+        "Help should mention 'invoke' command"
+    );
+}
+
+#[tokio::test]
+async fn test_cli_validate_bad_dir() {
+    let mut cmd = assert_cmd::Command::cargo_bin("lambdaform").unwrap();
+    let output = cmd
+        .args(["validate", "--dir", "/tmp/nonexistent-lambdaform-test"])
+        .output()
+        .unwrap();
+    // Should fail gracefully, not panic
+    assert!(!output.status.success());
+}
+
+// ─── Parser Edge Cases ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_parse_layer_compatible_runtimes() {
+    let dir = fixture_dir("lambda-layers");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(!config.layers.is_empty(), "Should parse layers");
+    // At least one function should reference a layer
+    let has_layer_ref = config.functions.iter().any(|f| !f.layers.is_empty());
+    assert!(
+        has_layer_ref,
+        "At least one function should reference a layer"
+    );
+}
+
+#[tokio::test]
+async fn test_parse_dynamodb_stream() {
+    let dir = fixture_dir("dynamodb");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    assert!(
+        !config.dynamodb_tables.is_empty(),
+        "Should parse DynamoDB tables"
+    );
+    let table = &config.dynamodb_tables[0];
+    assert!(
+        table.hash_key.is_some(),
+        "DynamoDB table should have a hash key"
+    );
+}
+
+#[tokio::test]
+async fn test_parse_websocket_routes() {
+    let dir = fixture_dir("websocket");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+    let ws_gw = config
+        .gateways
+        .iter()
+        .find(|g| g.api_type == ApiType::WebSocket);
+    assert!(ws_gw.is_some(), "Should find WebSocket gateway");
+    let gw = ws_gw.unwrap();
+    // Should have $connect, $disconnect, $default at minimum
+    let route_keys: Vec<&str> = gw.routes.iter().map(|r| r.path.as_str()).collect();
+    assert!(
+        route_keys.contains(&"$connect"),
+        "Should have $connect route"
+    );
+    assert!(
+        route_keys.contains(&"$disconnect"),
+        "Should have $disconnect route"
+    );
+}
