@@ -3940,4 +3940,350 @@ resource "aws_lambda_function" "worker" {
         assert_eq!(func.environment.get("STAGE").unwrap(), "dev");
         assert_eq!(func.environment.get("DEBUG").unwrap(), "true");
     }
+
+    #[test]
+    fn test_parse_step_function_state_machine() {
+        let tf_content = r#"
+resource "aws_sfn_state_machine" "order_flow" {
+  name     = "OrderProcessing"
+  type     = "EXPRESS"
+  role_arn = "arn:aws:iam::role/sfn"
+
+  definition = <<EOF
+{
+  "StartAt": "Validate",
+  "States": {
+    "Validate": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:123:function:validate",
+      "End": true
+    }
+  }
+}
+EOF
+}
+
+resource "aws_lambda_function" "validate" {
+  function_name = "validate"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "validate.zip"
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.state_machines.len(), 1);
+        let sfn = &config.state_machines[0];
+        assert_eq!(sfn.name, "OrderProcessing");
+        assert_eq!(sfn.machine_type, "EXPRESS");
+        assert!(sfn.definition.contains("Validate"));
+    }
+
+    #[test]
+    fn test_parse_sqs_queue_with_fifo() {
+        let tf_content = r#"
+resource "aws_sqs_queue" "orders" {
+  name                       = "orders-queue.fifo"
+  fifo_queue                 = true
+  visibility_timeout_seconds = 60
+}
+
+resource "aws_lambda_function" "processor" {
+  function_name = "sqs-processor"
+  handler       = "index.handler"
+  runtime       = "python3.12"
+  role          = "arn:aws:iam::role/test"
+  filename      = "processor.zip"
+}
+
+resource "aws_lambda_event_source_mapping" "sqs_trigger" {
+  event_source_arn = aws_sqs_queue.orders.arn
+  function_name    = aws_lambda_function.processor.arn
+  batch_size       = 5
+  enabled          = true
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.sqs_queues.len(), 1);
+        let q = &config.sqs_queues[0];
+        assert_eq!(q.name, "orders-queue.fifo");
+        assert!(q.fifo_queue);
+        assert_eq!(q.visibility_timeout, 60);
+
+        assert_eq!(config.event_source_mappings.len(), 1);
+        let esm = &config.event_source_mappings[0];
+        assert_eq!(esm.source_resource, "orders");
+        assert_eq!(esm.function_resource, "processor");
+        assert_eq!(esm.batch_size, 5);
+    }
+
+    #[test]
+    fn test_parse_dynamodb_with_gsi_and_lsi() {
+        let tf_content = r#"
+resource "aws_dynamodb_table" "users" {
+  name         = "Users"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  global_secondary_index {
+    name     = "email-index"
+    hash_key = "email"
+  }
+
+  global_secondary_index {
+    name      = "status-index"
+    hash_key  = "status"
+    range_key = "created_at"
+  }
+
+  local_secondary_index {
+    name      = "name-index"
+    range_key = "name"
+  }
+
+  stream_enabled = true
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.dynamodb_tables.len(), 1);
+        let table = &config.dynamodb_tables[0];
+        assert_eq!(table.name, "Users");
+        assert_eq!(table.billing_mode, "PAY_PER_REQUEST");
+        assert_eq!(table.hash_key.as_deref(), Some("pk"));
+        assert_eq!(table.range_key.as_deref(), Some("sk"));
+        assert_eq!(table.gsi_names.len(), 2);
+        assert!(table.gsi_names.contains(&"email-index".to_string()));
+        assert!(table.gsi_names.contains(&"status-index".to_string()));
+        assert_eq!(table.lsi_names.len(), 1);
+        assert!(table.lsi_names.contains(&"name-index".to_string()));
+        assert!(table.stream_enabled);
+    }
+
+    #[test]
+    fn test_parse_sns_topic_with_fifo() {
+        let tf_content = r#"
+resource "aws_sns_topic" "alerts" {
+  name       = "alerts-topic.fifo"
+  fifo_topic = true
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.sns_topics.len(), 1);
+        let topic = &config.sns_topics[0];
+        assert_eq!(topic.name, "alerts-topic.fifo");
+        assert!(topic.fifo_topic);
+    }
+
+    #[test]
+    fn test_parse_event_source_mapping_dynamodb_stream() {
+        let tf_content = r#"
+resource "aws_dynamodb_table" "orders" {
+  name           = "Orders"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "id"
+  stream_enabled = true
+}
+
+resource "aws_lambda_function" "stream_handler" {
+  function_name = "stream-handler"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "handler.zip"
+}
+
+resource "aws_lambda_event_source_mapping" "ddb_trigger" {
+  event_source_arn = aws_dynamodb_table.orders.stream_arn
+  function_name    = aws_lambda_function.stream_handler.arn
+  batch_size       = 100
+  enabled          = false
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.event_source_mappings.len(), 1);
+        let esm = &config.event_source_mappings[0];
+        assert_eq!(esm.source_type, crate::config::EventSourceType::DynamoDb);
+        assert_eq!(esm.source_resource, "orders");
+        assert_eq!(esm.function_resource, "stream_handler");
+        assert_eq!(esm.batch_size, 100);
+        assert!(!esm.enabled);
+    }
+
+    #[test]
+    fn test_parse_empty_tf_directory() {
+        let dir = TempDir::new().unwrap();
+        // No .tf files at all
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert!(config.functions.is_empty());
+        assert!(config.gateways.is_empty());
+        assert!(config.dynamodb_tables.is_empty());
+    }
+
+    #[test]
+    fn test_parse_lambda_with_layers_reference() {
+        let tf_content = r#"
+resource "aws_lambda_layer_version" "utils" {
+  layer_name          = "shared-utils"
+  filename            = "utils.zip"
+  compatible_runtimes = ["nodejs20.x"]
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api-handler"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "api.zip"
+  layers        = [aws_lambda_layer_version.utils.arn]
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.layers.len(), 1);
+        assert_eq!(config.layers[0].layer_name, "shared-utils");
+        assert_eq!(config.functions.len(), 1);
+        assert_eq!(config.functions[0].layers.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_multiple_tf_files_in_directory() {
+        let dir = TempDir::new().unwrap();
+
+        // Split resources across multiple files (common Terraform pattern)
+        fs::write(
+            dir.path().join("functions.tf"),
+            r#"
+resource "aws_lambda_function" "api" {
+  function_name = "api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "api.zip"
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.path().join("database.tf"),
+            r#"
+resource "aws_dynamodb_table" "data" {
+  name         = "AppData"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.path().join("queues.tf"),
+            r#"
+resource "aws_sqs_queue" "jobs" {
+  name = "job-queue"
+}
+"#,
+        )
+        .unwrap();
+
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions.len(), 1);
+        assert_eq!(config.dynamodb_tables.len(), 1);
+        assert_eq!(config.sqs_queues.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_lambda_defaults_without_optional_fields() {
+        // Lambda with only required fields — verify defaults
+        let tf_content = r#"
+resource "aws_lambda_function" "minimal" {
+  function_name = "minimal"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "minimal.zip"
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        let func = &config.functions[0];
+        assert_eq!(func.timeout, 3); // AWS default
+        assert_eq!(func.memory_size, 128); // AWS default
+        assert!(func.environment.is_empty());
+        assert!(func.layers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_rest_api_gateway_v1_full_stack() {
+        let tf_content = r#"
+resource "aws_api_gateway_rest_api" "api" {
+  name = "MyRestAPI"
+}
+
+resource "aws_api_gateway_resource" "users" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_rest_api.api.root_resource_id
+  path_part   = "users"
+}
+
+resource "aws_api_gateway_method" "get_users" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.users.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "get_users" {
+  rest_api_id             = aws_api_gateway_rest_api.api.id
+  resource_id             = aws_api_gateway_resource.users.id
+  http_method             = aws_api_gateway_method.get_users.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.api.invoke_arn
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "rest-api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "api.zip"
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        assert_eq!(config.functions.len(), 1);
+        // Should have one REST API gateway
+        let rest_gws: Vec<_> = config
+            .gateways
+            .iter()
+            .filter(|g| g.api_type == ApiType::Rest)
+            .collect();
+        assert_eq!(rest_gws.len(), 1);
+        assert_eq!(rest_gws[0].name, "MyRestAPI");
+        assert_eq!(rest_gws[0].routes.len(), 1);
+        assert_eq!(rest_gws[0].routes[0].path, "/users");
+    }
 }
