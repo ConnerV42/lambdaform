@@ -386,4 +386,94 @@ mod tests {
         assert!(record["Sns"]["Timestamp"].is_string());
         assert_eq!(record["Sns"]["Type"], "Notification");
     }
+
+    #[test]
+    fn test_sqs_event_receipt_handle_nonempty() {
+        let event = build_sqs_event("q", &["msg".to_string()], false);
+        let handle = event["Records"][0]["receiptHandle"].as_str().unwrap();
+        assert!(!handle.is_empty());
+        assert!(handle.starts_with("AQEBwJnK"));
+    }
+
+    #[test]
+    fn test_sqs_event_attributes_present() {
+        let event = build_sqs_event("q", &["msg".to_string()], false);
+        let attrs = &event["Records"][0]["attributes"];
+        assert!(attrs["ApproximateReceiveCount"].is_string());
+        assert!(attrs["SentTimestamp"].is_string());
+        assert!(attrs["SenderId"].is_string());
+        assert!(attrs["ApproximateFirstReceiveTimestamp"].is_string());
+    }
+
+    #[test]
+    fn test_sqs_fifo_has_sequence_number() {
+        let event = build_sqs_event("q.fifo", &["msg".to_string()], true);
+        let attrs = &event["Records"][0]["attributes"];
+        assert!(attrs["SequenceNumber"].is_string());
+        assert!(attrs["MessageDeduplicationId"].is_string());
+        assert_eq!(attrs["MessageGroupId"], "lambdaform");
+    }
+
+    #[test]
+    fn test_sqs_event_unique_message_ids() {
+        let msgs = vec!["a".to_string(), "b".to_string()];
+        let event = build_sqs_event("q", &msgs, false);
+        let records = event["Records"].as_array().unwrap();
+        let id0 = records[0]["messageId"].as_str().unwrap();
+        let id1 = records[1]["messageId"].as_str().unwrap();
+        assert_ne!(id0, id1, "each message should have a unique ID");
+    }
+
+    #[test]
+    fn test_sns_event_subscription_arn_format() {
+        let event = build_sns_event("my-topic", &["msg".to_string()]);
+        let sub_arn = event["Records"][0]["EventSubscriptionArn"]
+            .as_str()
+            .unwrap();
+        assert!(sub_arn.contains("my-topic"));
+        assert!(sub_arn.ends_with(":lambdaform-sub"));
+    }
+
+    #[test]
+    fn test_sns_event_null_subject() {
+        let event = build_sns_event("t", &["msg".to_string()]);
+        assert!(event["Records"][0]["Sns"]["Subject"].is_null());
+    }
+
+    #[test]
+    fn test_chrono_timestamp_civil_date_valid() {
+        let ts = chrono_timestamp();
+        // Parse the date parts and verify they're reasonable
+        let year: i32 = ts[0..4].parse().unwrap();
+        let month: u32 = ts[5..7].parse().unwrap();
+        let day: u32 = ts[8..10].parse().unwrap();
+        assert!(year >= 2026 && year <= 2100, "year out of range: {}", year);
+        assert!((1..=12).contains(&month), "month out of range: {}", month);
+        assert!((1..=31).contains(&day), "day out of range: {}", day);
+    }
+
+    #[test]
+    fn test_chrono_timestamp_time_valid() {
+        let ts = chrono_timestamp();
+        let hours: u32 = ts[11..13].parse().unwrap();
+        let minutes: u32 = ts[14..16].parse().unwrap();
+        let seconds: u32 = ts[17..19].parse().unwrap();
+        assert!(hours < 24, "hours out of range: {}", hours);
+        assert!(minutes < 60, "minutes out of range: {}", minutes);
+        assert!(seconds < 60, "seconds out of range: {}", seconds);
+    }
+
+    #[test]
+    fn test_sqs_empty_messages() {
+        let event = build_sqs_event("q", &[], false);
+        let records = event["Records"].as_array().unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_sns_empty_messages() {
+        let event = build_sns_event("t", &[]);
+        let records = event["Records"].as_array().unwrap();
+        assert!(records.is_empty());
+    }
 }
