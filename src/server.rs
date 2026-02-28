@@ -1892,6 +1892,50 @@ mod tests {
         let _ = std::fs::remove_dir(&dir1);
         let _ = std::fs::remove_dir(&dir2);
     }
+
+    #[test]
+    fn test_format_timestamp_is_valid_iso8601() {
+        let ts = format_timestamp();
+        // Should match YYYY-MM-DDTHH:MM:SSZ
+        assert!(ts.ends_with('Z'), "Timestamp should end with Z: {}", ts);
+        assert_eq!(ts.len(), 20, "Timestamp should be 20 chars: {}", ts);
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], "T");
+        assert_eq!(&ts[13..14], ":");
+        assert_eq!(&ts[16..17], ":");
+    }
+
+    #[test]
+    fn test_format_timestamp_valid_date_ranges() {
+        let ts = format_timestamp();
+        let year: u32 = ts[0..4].parse().unwrap();
+        let month: u32 = ts[5..7].parse().unwrap();
+        let day: u32 = ts[8..10].parse().unwrap();
+        let hour: u32 = ts[11..13].parse().unwrap();
+        let minute: u32 = ts[14..16].parse().unwrap();
+        let second: u32 = ts[17..19].parse().unwrap();
+
+        assert!(year >= 2020 && year <= 2100, "Year out of range: {}", year);
+        assert!(month >= 1 && month <= 12, "Month out of range: {}", month);
+        assert!(day >= 1 && day <= 31, "Day out of range: {}", day);
+        assert!(hour < 24, "Hour out of range: {}", hour);
+        assert!(minute < 60, "Minute out of range: {}", minute);
+        assert!(second < 60, "Second out of range: {}", second);
+    }
+
+    #[test]
+    fn test_format_timestamp_consistency() {
+        // Two calls within a second should produce same or adjacent timestamps
+        let ts1 = format_timestamp();
+        let ts2 = format_timestamp();
+        // At minimum, the date portion should be identical
+        assert_eq!(
+            &ts1[0..10],
+            &ts2[0..10],
+            "Date should be consistent within rapid calls"
+        );
+    }
 }
 
 /// Resolve layer paths for a Lambda function.
