@@ -1806,7 +1806,7 @@ fn parse_lambda_function(
     // Extract architecture from architectures list (defaults to x86_64)
     let architecture = get_list_string_attrs(body, "architectures")
         .first()
-        .map(|s| s.parse::<crate::config::Architecture>().unwrap())
+        .and_then(|s| s.parse::<crate::config::Architecture>().ok())
         .unwrap_or_default();
 
     Ok(Some(LambdaConfig {
@@ -4232,6 +4232,27 @@ resource "aws_lambda_function" "minimal" {
         assert_eq!(func.memory_size, 128); // AWS default
         assert!(func.environment.is_empty());
         assert!(func.layers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_lambda_invalid_architecture_defaults_to_x86() {
+        // Invalid architecture string should gracefully default to x86_64, not panic
+        let tf_content = r#"
+resource "aws_lambda_function" "custom_arch" {
+  function_name = "custom-arch"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::role/test"
+  filename      = "func.zip"
+  architectures = ["sparc64"]
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+
+        let func = &config.functions[0];
+        assert_eq!(func.architecture, crate::config::Architecture::X86_64);
     }
 
     #[test]
