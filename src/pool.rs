@@ -931,3 +931,255 @@ for line in sys.stdin:
         _stderr_drain,
     })
 }
+
+// Additional pool tests - error handling and edge cases
+#[cfg(test)]
+mod tests_extended {
+    use super::*;
+
+    fn create_node_handler(dir: &std::path::Path, filename: &str, code: &str) {
+        std::fs::write(dir.join(filename), code).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pool_nodejs_import_error_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "index.js",
+            r#"throw new Error("module load failure");"#,
+        );
+
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "bad_import",
+                &crate::config::Runtime::Nodejs20,
+                "index.handler",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pool_python_import_error_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("bad.py"),
+            "raise RuntimeError('import boom')\n",
+        )
+        .unwrap();
+
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "bad_py",
+                &crate::config::Runtime::Python312,
+                "bad.handle",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pool_missing_handler_function_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "index.js",
+            r#"exports.other = async () => ({ body: "nope" });"#,
+        );
+
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "missing_fn",
+                &crate::config::Runtime::Nodejs20,
+                "index.handler",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not a function")
+                || err_msg.contains("Failed to spawn")
+                || err_msg.contains("failed to initialize"),
+            "unexpected error: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pool_python_handler_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("err.py"),
+            "def handle(event, context):\n    raise ValueError('python boom')\n",
+        )
+        .unwrap();
+
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "py_err",
+                &crate::config::Runtime::Python312,
+                "err.handle",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("python boom"));
+    }
+
+    #[tokio::test]
+    async fn test_pool_respawns_after_worker_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "index.js",
+            r#"exports.handler = async () => ({ body: "alive" });"#,
+        );
+
+        let pool = ProcessPool::new();
+        let env = HashMap::new();
+        let event = serde_json::json!({});
+        let ctx = serde_json::json!({});
+
+        let r1 = pool
+            .invoke(
+                "crash_test",
+                &crate::config::Runtime::Nodejs20,
+                "index.handler",
+                tmp.path(),
+                &env,
+                &event,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1["body"], "alive");
+
+        // Kill the worker process directly
+        {
+            let mut workers = pool.workers.lock().await;
+            let key = ("crash_test".to_string(), "index.handler".to_string());
+            if let Some(w) = workers.get(&key) {
+                let mut w = w.lock().await;
+                let _ = w.child.kill().await;
+                let _ = w.child.wait().await;
+            }
+        }
+
+        // Should respawn and succeed
+        let r2 = pool
+            .invoke(
+                "crash_test",
+                &crate::config::Runtime::Nodejs20,
+                "index.handler",
+                tmp.path(),
+                &env,
+                &event,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2["body"], "alive");
+    }
+
+    #[tokio::test]
+    async fn test_pool_python_env_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("env_check.py"),
+            "import os\ndef handle(event, context):\n    return {\"body\": os.environ.get(\"TABLE_NAME\", \"unset\")}\n",
+        )
+        .unwrap();
+
+        let pool = ProcessPool::new();
+        let mut env = HashMap::new();
+        env.insert("TABLE_NAME".to_string(), "my-table".to_string());
+
+        let result = pool
+            .invoke(
+                "py_env",
+                &crate::config::Runtime::Python312,
+                "env_check.handle",
+                tmp.path(),
+                &env,
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["body"], "my-table");
+    }
+
+    #[tokio::test]
+    async fn test_pool_missing_handler_file_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "ghost",
+                &crate::config::Runtime::Nodejs20,
+                "nonexistent.handler",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pool_nodejs_async_handler() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "index.js",
+            r#"exports.handler = async (event) => {
+                await new Promise(resolve => setTimeout(resolve, 10));
+                return { statusCode: 200, body: "async-done" };
+            };"#,
+        );
+
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "async_fn",
+                &crate::config::Runtime::Nodejs20,
+                "index.handler",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["body"], "async-done");
+    }
+}
