@@ -1182,4 +1182,257 @@ mod tests_extended {
 
         assert_eq!(result["body"], "async-done");
     }
+    #[tokio::test]
+    async fn test_pool_unsupported_runtime_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "unsupported",
+                &crate::config::Runtime::Go1,
+                "main",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not supported")
+                || err.contains("Process pool")
+                || err.contains("Failed to spawn"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pool_worker_reuse() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "counter.js",
+            r#"
+            let count = 0;
+            exports.handler = async () => {
+                count++;
+                return { body: String(count) };
+            };
+            "#,
+        );
+
+        let pool = ProcessPool::new();
+        let env = HashMap::new();
+        let event = serde_json::json!({});
+        let ctx = serde_json::json!({});
+
+        let r1 = pool
+            .invoke(
+                "reuse",
+                &crate::config::Runtime::Nodejs20,
+                "counter.handler",
+                tmp.path(),
+                &env,
+                &event,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let r2 = pool
+            .invoke(
+                "reuse",
+                &crate::config::Runtime::Nodejs20,
+                "counter.handler",
+                tmp.path(),
+                &env,
+                &event,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // If worker is reused, count increments across calls
+        assert_eq!(r1["body"], "1");
+        assert_eq!(r2["body"], "2");
+    }
+
+    #[tokio::test]
+    async fn test_pool_invalidate_kills_workers() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "index.js",
+            r#"exports.handler = async () => ({ body: "hi" });"#,
+        );
+
+        let pool = ProcessPool::new();
+        let env = HashMap::new();
+        let event = serde_json::json!({});
+        let ctx = serde_json::json!({});
+
+        pool.invoke(
+            "inv_test",
+            &crate::config::Runtime::Nodejs20,
+            "index.handler",
+            tmp.path(),
+            &env,
+            &event,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        {
+            let workers = pool.workers.lock().await;
+            assert_eq!(workers.len(), 1);
+        }
+
+        pool.invalidate_all().await;
+        {
+            let workers = pool.workers.lock().await;
+            assert!(workers.is_empty());
+        }
+
+        let result = pool
+            .invoke(
+                "inv_test",
+                &crate::config::Runtime::Nodejs20,
+                "index.handler",
+                tmp.path(),
+                &env,
+                &event,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["body"], "hi");
+    }
+
+    #[tokio::test]
+    async fn test_pool_concurrent_different_functions() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "a.js",
+            r#"exports.handler = async () => ({ body: "fn-a" });"#,
+        );
+        create_node_handler(
+            tmp.path(),
+            "b.js",
+            r#"exports.handler = async () => ({ body: "fn-b" });"#,
+        );
+
+        let pool = Arc::new(ProcessPool::new());
+        let env = HashMap::new();
+        let event = serde_json::json!({});
+        let ctx = serde_json::json!({});
+
+        let pool_a = Arc::clone(&pool);
+        let path = tmp.path().to_path_buf();
+        let env_a = env.clone();
+        let event_a = event.clone();
+        let ctx_a = ctx.clone();
+
+        let pool_b = Arc::clone(&pool);
+        let path_b = path.clone();
+        let env_b = env.clone();
+        let event_b = event.clone();
+        let ctx_b = ctx.clone();
+
+        let (ra, rb) = tokio::join!(
+            async move {
+                pool_a
+                    .invoke(
+                        "fn_a",
+                        &crate::config::Runtime::Nodejs20,
+                        "a.handler",
+                        &path,
+                        &env_a,
+                        &event_a,
+                        &ctx_a,
+                    )
+                    .await
+                    .unwrap()
+            },
+            async move {
+                pool_b
+                    .invoke(
+                        "fn_b",
+                        &crate::config::Runtime::Nodejs20,
+                        "b.handler",
+                        &path_b,
+                        &env_b,
+                        &event_b,
+                        &ctx_b,
+                    )
+                    .await
+                    .unwrap()
+            }
+        );
+
+        assert_eq!(ra["body"], "fn-a");
+        assert_eq!(rb["body"], "fn-b");
+
+        let workers = pool.workers.lock().await;
+        assert_eq!(workers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pool_lambda_error_returns_error_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "err.js",
+            r#"exports.handler = async () => { throw new Error("intentional boom"); };"#,
+        );
+
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "err_fn",
+                &crate::config::Runtime::Nodejs20,
+                "err.handler",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("intentional boom"));
+    }
+
+    #[tokio::test]
+    async fn test_pool_large_event_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "echo.js",
+            r#"exports.handler = async (event) => ({ body: JSON.stringify({ len: JSON.stringify(event).length }) });"#,
+        );
+
+        let pool = ProcessPool::new();
+        let big_string = "x".repeat(100_000);
+        let event = serde_json::json!({ "data": big_string });
+
+        let result = pool
+            .invoke(
+                "big_event",
+                &crate::config::Runtime::Nodejs20,
+                "echo.handler",
+                tmp.path(),
+                &HashMap::new(),
+                &event,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        let body: serde_json::Value =
+            serde_json::from_str(result["body"].as_str().unwrap()).unwrap();
+        assert!(body["len"].as_u64().unwrap() > 100_000);
+    }
 }
