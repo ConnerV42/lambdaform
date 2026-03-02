@@ -725,4 +725,106 @@ mod tests {
         // Should NOT show the full ARN prefix in the box
         assert!(!output.contains("arn:aws:lambda"));
     }
+
+    #[test]
+    fn test_succeed_as_start_state() {
+        let asl = r#"{"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}}"#;
+        let output = render_ascii("instant-success", "STANDARD", asl);
+        assert!(output.contains("START"));
+        assert!(output.contains("Done"));
+        assert!(output.contains("Succeed"));
+    }
+
+    #[test]
+    fn test_pass_state_with_result() {
+        let asl = r#"{
+            "StartAt": "SetDefaults",
+            "States": {
+                "SetDefaults": {
+                    "Type": "Pass",
+                    "Result": {"status": "initialized"},
+                    "Next": "Process"
+                },
+                "Process": {"Type": "Task", "Resource": "arn:aws:lambda:us-east-1:123:function:process", "End": true}
+            }
+        }"#;
+        let output = render_ascii("pass-result", "STANDARD", asl);
+        assert!(output.contains("SetDefaults"));
+        assert!(output.contains("Pass"));
+        assert!(output.contains("Process"));
+    }
+
+    #[test]
+    fn test_map_inside_parallel_branch() {
+        let asl = r#"{
+            "StartAt": "FanOut",
+            "States": {
+                "FanOut": {
+                    "Type": "Parallel",
+                    "Branches": [
+                        {
+                            "StartAt": "MapItems",
+                            "States": {
+                                "MapItems": {
+                                    "Type": "Map",
+                                    "Iterator": {
+                                        "StartAt": "Transform",
+                                        "States": {
+                                            "Transform": {"Type": "Task", "Resource": "arn:aws:lambda:us-east-1:123:function:transform", "End": true}
+                                        }
+                                    },
+                                    "End": true
+                                }
+                            }
+                        }
+                    ],
+                    "End": true
+                }
+            }
+        }"#;
+        let output = render_ascii("nested-map-parallel", "STANDARD", asl);
+        assert!(output.contains("Parallel Branch 1"));
+        assert!(output.contains("Map Iterator"));
+        assert!(output.contains("Transform"));
+        assert!(output.contains("End Map"));
+    }
+
+    #[test]
+    fn test_choice_converging_branches() {
+        let asl = r#"{
+            "StartAt": "Decide",
+            "States": {
+                "Decide": {
+                    "Type": "Choice",
+                    "Choices": [
+                        {"Variable": "$.a", "Next": "Shared"},
+                        {"Variable": "$.b", "Next": "Shared"}
+                    ],
+                    "Default": "Shared"
+                },
+                "Shared": {"Type": "Pass", "End": true}
+            }
+        }"#;
+        let output = render_ascii("converge-test", "STANDARD", asl);
+        assert!(output.contains("Decide"));
+        assert!(output.contains("Shared"));
+    }
+
+    #[test]
+    fn test_long_chain_renders_all_states() {
+        let asl = r#"{
+            "StartAt": "S1",
+            "States": {
+                "S1": {"Type": "Pass", "Next": "S2"},
+                "S2": {"Type": "Pass", "Next": "S3"},
+                "S3": {"Type": "Pass", "Next": "S4"},
+                "S4": {"Type": "Pass", "Next": "S5"},
+                "S5": {"Type": "Pass", "End": true}
+            }
+        }"#;
+        let output = render_ascii("chain", "STANDARD", asl);
+        for i in 1..=5 {
+            assert!(output.contains(&format!("S{}", i)), "Missing S{}", i);
+        }
+    }
 }
