@@ -2276,6 +2276,208 @@ mod tests {
     }
 
     #[test]
+    fn test_lambda_event_v2_serialization() {
+        let event = LambdaEventV2 {
+            version: "2.0".to_string(),
+            route_key: "GET /items".to_string(),
+            raw_path: "/items".to_string(),
+            raw_query_string: "page=1&limit=10".to_string(),
+            cookies: Some(vec!["session=abc123".to_string()]),
+            path_parameters: Some(HashMap::from([("id".to_string(), "42".to_string())])),
+            query_string_parameters: Some(HashMap::from([
+                ("page".to_string(), "1".to_string()),
+                ("limit".to_string(), "10".to_string()),
+            ])),
+            stage_variables: None,
+            headers: Some(HashMap::from([(
+                "content-type".to_string(),
+                "application/json".to_string(),
+            )])),
+            body: Some(r#"{"name":"test"}"#.to_string()),
+            is_base64_encoded: false,
+            request_context: RequestContextV2 {
+                stage: "$default".to_string(),
+                request_id: "req-v2-1".to_string(),
+                api_id: "api123".to_string(),
+                route_key: "GET /items".to_string(),
+                account_id: "123456789012".to_string(),
+                domain_name: "api123.execute-api.us-east-1.amazonaws.com".to_string(),
+                domain_prefix: "api123".to_string(),
+                time: "01/Jan/2025:00:00:00 +0000".to_string(),
+                time_epoch: 1735689600000,
+                http: RequestContextHttp {
+                    method: "GET".to_string(),
+                    path: "/items".to_string(),
+                    protocol: "HTTP/1.1".to_string(),
+                    source_ip: "192.168.1.1".to_string(),
+                    user_agent: "curl/7.68.0".to_string(),
+                },
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["version"], "2.0");
+        assert_eq!(json["routeKey"], "GET /items");
+        assert_eq!(json["rawPath"], "/items");
+        assert_eq!(json["rawQueryString"], "page=1&limit=10");
+        assert_eq!(json["cookies"][0], "session=abc123");
+        assert_eq!(json["requestContext"]["http"]["method"], "GET");
+        assert_eq!(json["requestContext"]["accountId"], "123456789012");
+        assert_eq!(json["requestContext"]["domainPrefix"], "api123");
+        assert!(json.get("stageVariables").is_none());
+    }
+
+    #[test]
+    fn test_lambda_event_v2_no_optional_fields() {
+        let event = LambdaEventV2 {
+            version: "2.0".to_string(),
+            route_key: "ANY /".to_string(),
+            raw_path: "/".to_string(),
+            raw_query_string: String::new(),
+            cookies: None,
+            path_parameters: None,
+            query_string_parameters: None,
+            stage_variables: None,
+            headers: None,
+            body: None,
+            is_base64_encoded: false,
+            request_context: RequestContextV2 {
+                stage: "$default".to_string(),
+                request_id: "req-1".to_string(),
+                api_id: "api1".to_string(),
+                route_key: "ANY /".to_string(),
+                account_id: "000".to_string(),
+                domain_name: "localhost".to_string(),
+                domain_prefix: "localhost".to_string(),
+                time: "now".to_string(),
+                time_epoch: 0,
+                http: RequestContextHttp {
+                    method: "GET".to_string(),
+                    path: "/".to_string(),
+                    protocol: "HTTP/1.1".to_string(),
+                    source_ip: "127.0.0.1".to_string(),
+                    user_agent: "test".to_string(),
+                },
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json.get("cookies").is_none());
+        assert!(json.get("pathParameters").is_none());
+        assert!(json.get("queryStringParameters").is_none());
+        assert!(json.get("stageVariables").is_none());
+        assert!(json.get("headers").is_none());
+        assert!(json.get("body").is_none());
+    }
+
+    #[test]
+    fn test_lambda_context_serialization() {
+        let ctx = LambdaContext {
+            function_name: "my-function".to_string(),
+            function_version: "$LATEST".to_string(),
+            memory_limit_in_mb: 512,
+            aws_request_id: "req-abc-123".to_string(),
+            invoked_function_arn: "arn:aws:lambda:us-east-1:123456789012:function:my-function"
+                .to_string(),
+        };
+        let json = serde_json::to_value(&ctx).unwrap();
+        assert_eq!(json["functionName"], "my-function");
+        assert_eq!(json["functionVersion"], "$LATEST");
+        assert_eq!(json["memoryLimitInMb"], 512);
+        assert_eq!(json["awsRequestId"], "req-abc-123");
+        assert!(json["invokedFunctionArn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:lambda"));
+    }
+
+    #[test]
+    fn test_authorizer_event_request_type() {
+        let event = AuthorizerEvent {
+            auth_type: "REQUEST".to_string(),
+            authorization_token: None,
+            method_arn: "arn:aws:execute-api:local:000:api/GET/secure".to_string(),
+            http_method: "GET".to_string(),
+            path: "/secure".to_string(),
+            headers: Some(HashMap::from([
+                ("authorization".to_string(), "Bearer xyz".to_string()),
+                ("x-custom".to_string(), "value".to_string()),
+            ])),
+            query_string_parameters: Some(HashMap::from([(
+                "token".to_string(),
+                "abc".to_string(),
+            )])),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "REQUEST");
+        assert!(json["authorizationToken"].is_null());
+        assert_eq!(json["headers"]["authorization"], "Bearer xyz");
+        assert_eq!(json["queryStringParameters"]["token"], "abc");
+    }
+
+    #[test]
+    fn test_use_pool_logic() {
+        let dir = TempDir::new().unwrap();
+        let config = LambdaConfig {
+            resource_name: "test".to_string(),
+            function_name: "test".to_string(),
+            handler: "index.handler".to_string(),
+            runtime: Runtime::Nodejs20,
+            source_path: None,
+            filename_ref: None,
+            environment: HashMap::new(),
+            timeout: 30,
+            memory_size: 128,
+            layers: vec![],
+            architecture: crate::config::Architecture::default(),
+        };
+
+        // No pool, no debug -> false
+        let exec = FunctionExecutor::new(config.clone(), dir.path().to_path_buf());
+        assert!(!exec.use_pool());
+
+        // Pool, no debug -> true
+        let exec = FunctionExecutor::new(config.clone(), dir.path().to_path_buf())
+            .with_pool(Some(Arc::new(ProcessPool::new())));
+        assert!(exec.use_pool());
+
+        // Pool + debug -> false
+        let exec = FunctionExecutor::new(config.clone(), dir.path().to_path_buf())
+            .with_pool(Some(Arc::new(ProcessPool::new())))
+            .with_debug(Some(DebugOptions {
+                nodejs: true,
+                ..Default::default()
+            }));
+        assert!(!exec.use_pool());
+    }
+
+    #[test]
+    fn test_check_runtime_binary_nodejs() {
+        let result = check_runtime_binary(&Runtime::Nodejs20);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_runtime_binary_python() {
+        let result = check_runtime_binary(&Runtime::Python312);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_runtime_binary_provided_skips_check() {
+        let result = check_runtime_binary(&Runtime::ProvidedAl2023);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_debug_options_default() {
+        let opts = DebugOptions::default();
+        assert!(!opts.nodejs);
+        assert!(!opts.python);
+        assert_eq!(opts.port, 0);
+        assert_eq!(opts.python_port, 0);
+        assert!(!opts.break_on_start);
+    }
+
+    #[test]
     fn test_user_env_vars_override_defaults() {
         use crate::config::Architecture;
         let dir = TempDir::new().unwrap();
