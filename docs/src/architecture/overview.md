@@ -35,7 +35,7 @@ Lambdaform is a single Rust binary (~10.5k lines) organized into focused modules
 |--------|------|-------|---------|
 | **CLI** | `main.rs` | 1,679 | Command parsing, orchestration |
 | **Parser** | `parser.rs` | 2,780 | HCL parsing, resource extraction |
-| **Runtime** | `runtime.rs` | 1,318 | Lambda invocation (Node.js, Python, Go) |
+| **Runtime** | `runtime.rs` | 1,318 | Lambda invocation (Node.js, Python, Go, Rust, Java) |
 | **Server** | `server.rs` | 1,053 | HTTP server, request/response handling |
 | **WebSocket** | `websocket.rs` | 596 | WebSocket API Gateway emulation |
 | **Step Functions** | `stepfunctions.rs` | 526 | State machine visualization |

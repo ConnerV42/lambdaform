@@ -27,7 +27,7 @@ It discovers your `aws_lambda_function`, `aws_api_gateway_*`, and `aws_apigatewa
 ## Key Features
 
 - **Zero configuration** — works out of the box with standard Terraform Lambda projects
-- **All major runtimes** — Node.js, Python, and Go
+- **All major runtimes** — Node.js, Python, Go, Rust, and Java (Docker)
 - **Both API Gateway versions** — REST API (v1) and HTTP API (v2)
 - **WebSocket APIs** — full `$connect`/`$disconnect`/custom route support
 - **Lambda authorizers** — TOKEN and REQUEST types execute before your handler
