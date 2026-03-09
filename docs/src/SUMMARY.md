@@ -25,6 +25,8 @@
 - [Debugging](./guide/debugging.md)
 - [Request Replay](./guide/replay.md)
 - [Terminal UI](./guide/terminal-ui.md)
+- [Function URLs](./guide/function-urls.md)
+- [Cost Estimation](./guide/cost-estimation.md)
 - [Infrastructure Graph](./graph.md)
 - [Troubleshooting](./guide/troubleshooting.md)
 - [FAQ](./guide/faq.md)

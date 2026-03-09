@@ -137,6 +137,60 @@ lambdaform init [OPTIONS]
 | `--dir <DIR>` | Target directory |
 | `--yes`, `-y` | Accept all defaults (non-interactive) |
 
+## `lambdaform cost`
+
+Estimate AWS Lambda costs based on recorded request history.
+
+```bash
+lambdaform cost [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dir <DIR>` | `.` | Directory containing Terraform files (with `.lambdaform/`) |
+| `--arch <ARCH>` | `x86` | Architecture for pricing (`x86` or `arm`) |
+| `--json` | off | Output as JSON |
+| `--var-file <FILE>` | — | Load `.tfvars` file (repeatable) |
+
+Requires request history — run `lambdaform start --record` first to capture invocations.
+
+## `lambdaform graph`
+
+Visualize infrastructure relationships as an ASCII diagram, DOT graph, or JSON.
+
+```bash
+lambdaform graph [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dir <DIR>` | `.` | Terraform directory |
+| `--format <FORMAT>` | `ascii` | Output format: `ascii`, `dot`, or `json` |
+| `--var-file <FILE>` | — | Load `.tfvars` file (repeatable) |
+| `--port <PORT>` | — | Simulate port assignments in output |
+
+## `lambdaform completions`
+
+Generate shell completions.
+
+```bash
+lambdaform completions <SHELL>
+```
+
+Supported shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`.
+
+## `lambdaform plugins`
+
+List and manage plugins.
+
+```bash
+lambdaform plugins [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--dir <DIR>` | Terraform directory |
+
 ## Exit Codes
 
 | Code | Meaning |
