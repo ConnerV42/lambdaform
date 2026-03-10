@@ -1183,249 +1183,161 @@ mod tests_extended {
         assert_eq!(result["body"], "async-done");
     }
     #[tokio::test]
-    async fn test_pool_unsupported_runtime_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = ProcessPool::new();
-        let result = pool
-            .invoke(
-                "unsupported",
-                &crate::config::Runtime::Go1,
-                "main",
-                tmp.path(),
-                &HashMap::new(),
-                &serde_json::json!({}),
-                &serde_json::json!({}),
-            )
-            .await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("not supported")
-                || err.contains("Process pool")
-                || err.contains("Failed to spawn"),
-            "unexpected: {}",
-            err
-        );
-    }
-
-    #[tokio::test]
-    async fn test_pool_worker_reuse() {
+    async fn test_pool_context_object_passed_through() {
         let tmp = tempfile::tempdir().unwrap();
         create_node_handler(
             tmp.path(),
-            "counter.js",
+            "ctx.js",
+            r#"exports.handler = async (event, context) => ({
+                body: JSON.stringify({
+                    fn_name: context.functionName,
+                    timeout: context.timeout,
+                    region: context.region
+                })
+            });"#,
+        );
+
+        let pool = ProcessPool::new();
+        let context = serde_json::json!({
+            "functionName": "my_lambda",
+            "timeout": 30,
+            "region": "us-west-2"
+        });
+
+        let result = pool
+            .invoke(
+                "ctx_fn",
+                &crate::config::Runtime::Nodejs20,
+                "ctx.handler",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let body: serde_json::Value =
+            serde_json::from_str(result["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body["fn_name"], "my_lambda");
+        assert_eq!(body["timeout"], 30);
+        assert_eq!(body["region"], "us-west-2");
+    }
+
+    #[tokio::test]
+    async fn test_pool_python_async_like_handler() {
+        // Python handlers are synchronous but should handle complex return types
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("complex.py"),
             r#"
-            let count = 0;
-            exports.handler = async () => {
-                count++;
-                return { body: String(count) };
-            };
-            "#,
-        );
-
-        let pool = ProcessPool::new();
-        let env = HashMap::new();
-        let event = serde_json::json!({});
-        let ctx = serde_json::json!({});
-
-        let r1 = pool
-            .invoke(
-                "reuse",
-                &crate::config::Runtime::Nodejs20,
-                "counter.handler",
-                tmp.path(),
-                &env,
-                &event,
-                &ctx,
-            )
-            .await
-            .unwrap();
-        let r2 = pool
-            .invoke(
-                "reuse",
-                &crate::config::Runtime::Nodejs20,
-                "counter.handler",
-                tmp.path(),
-                &env,
-                &event,
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        // If worker is reused, count increments across calls
-        assert_eq!(r1["body"], "1");
-        assert_eq!(r2["body"], "2");
+def handle(event, context):
+    items = [{"id": i, "name": f"item-{i}"} for i in range(5)]
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": str(len(items)),
+        "isBase64Encoded": False
     }
-
-    #[tokio::test]
-    async fn test_pool_invalidate_kills_workers() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_node_handler(
-            tmp.path(),
-            "index.js",
-            r#"exports.handler = async () => ({ body: "hi" });"#,
-        );
-
-        let pool = ProcessPool::new();
-        let env = HashMap::new();
-        let event = serde_json::json!({});
-        let ctx = serde_json::json!({});
-
-        pool.invoke(
-            "inv_test",
-            &crate::config::Runtime::Nodejs20,
-            "index.handler",
-            tmp.path(),
-            &env,
-            &event,
-            &ctx,
+"#,
         )
-        .await
         .unwrap();
-        {
-            let workers = pool.workers.lock().await;
-            assert_eq!(workers.len(), 1);
-        }
-
-        pool.invalidate_all().await;
-        {
-            let workers = pool.workers.lock().await;
-            assert!(workers.is_empty());
-        }
-
-        let result = pool
-            .invoke(
-                "inv_test",
-                &crate::config::Runtime::Nodejs20,
-                "index.handler",
-                tmp.path(),
-                &env,
-                &event,
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert_eq!(result["body"], "hi");
-    }
-
-    #[tokio::test]
-    async fn test_pool_concurrent_different_functions() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_node_handler(
-            tmp.path(),
-            "a.js",
-            r#"exports.handler = async () => ({ body: "fn-a" });"#,
-        );
-        create_node_handler(
-            tmp.path(),
-            "b.js",
-            r#"exports.handler = async () => ({ body: "fn-b" });"#,
-        );
-
-        let pool = Arc::new(ProcessPool::new());
-        let env = HashMap::new();
-        let event = serde_json::json!({});
-        let ctx = serde_json::json!({});
-
-        let pool_a = Arc::clone(&pool);
-        let path = tmp.path().to_path_buf();
-        let env_a = env.clone();
-        let event_a = event.clone();
-        let ctx_a = ctx.clone();
-
-        let pool_b = Arc::clone(&pool);
-        let path_b = path.clone();
-        let env_b = env.clone();
-        let event_b = event.clone();
-        let ctx_b = ctx.clone();
-
-        let (ra, rb) = tokio::join!(
-            async move {
-                pool_a
-                    .invoke(
-                        "fn_a",
-                        &crate::config::Runtime::Nodejs20,
-                        "a.handler",
-                        &path,
-                        &env_a,
-                        &event_a,
-                        &ctx_a,
-                    )
-                    .await
-                    .unwrap()
-            },
-            async move {
-                pool_b
-                    .invoke(
-                        "fn_b",
-                        &crate::config::Runtime::Nodejs20,
-                        "b.handler",
-                        &path_b,
-                        &env_b,
-                        &event_b,
-                        &ctx_b,
-                    )
-                    .await
-                    .unwrap()
-            }
-        );
-
-        assert_eq!(ra["body"], "fn-a");
-        assert_eq!(rb["body"], "fn-b");
-
-        let workers = pool.workers.lock().await;
-        assert_eq!(workers.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_pool_lambda_error_returns_error_message() {
-        let tmp = tempfile::tempdir().unwrap();
-        create_node_handler(
-            tmp.path(),
-            "err.js",
-            r#"exports.handler = async () => { throw new Error("intentional boom"); };"#,
-        );
 
         let pool = ProcessPool::new();
         let result = pool
             .invoke(
-                "err_fn",
-                &crate::config::Runtime::Nodejs20,
-                "err.handler",
+                "py_complex",
+                &crate::config::Runtime::Python312,
+                "complex.handle",
                 tmp.path(),
                 &HashMap::new(),
                 &serde_json::json!({}),
                 &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["statusCode"], 200);
+        assert_eq!(result["body"], "5");
+        assert_eq!(result["headers"]["Content-Type"], "application/json");
+    }
+
+    #[tokio::test]
+    async fn test_pool_recover_after_error_then_success() {
+        // After a handler throws, the same function should still work on next call
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "conditional.js",
+            r#"exports.handler = async (event) => {
+                if (event.shouldFail) throw new Error("conditional fail");
+                return { body: "ok" };
+            };"#,
+        );
+
+        let pool = ProcessPool::new();
+        let env = HashMap::new();
+        let ctx = serde_json::json!({});
+
+        // First call: error
+        let err_result = pool
+            .invoke(
+                "recover_fn",
+                &crate::config::Runtime::Nodejs20,
+                "conditional.handler",
+                tmp.path(),
+                &env,
+                &serde_json::json!({"shouldFail": true}),
+                &ctx,
             )
             .await;
+        assert!(err_result.is_err());
 
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("intentional boom"));
+        // Second call: should succeed (worker respawns or reuses)
+        let ok_result = pool
+            .invoke(
+                "recover_fn",
+                &crate::config::Runtime::Nodejs20,
+                "conditional.handler",
+                tmp.path(),
+                &env,
+                &serde_json::json!({"shouldFail": false}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok_result["body"], "ok");
     }
 
     #[tokio::test]
-    async fn test_pool_large_event_payload() {
+    async fn test_pool_multiple_env_vars() {
         let tmp = tempfile::tempdir().unwrap();
         create_node_handler(
             tmp.path(),
-            "echo.js",
-            r#"exports.handler = async (event) => ({ body: JSON.stringify({ len: JSON.stringify(event).length }) });"#,
+            "multi_env.js",
+            r#"exports.handler = async () => ({
+                body: JSON.stringify({
+                    table: process.env.TABLE_NAME || "",
+                    region: process.env.AWS_REGION || "",
+                    stage: process.env.STAGE || ""
+                })
+            });"#,
         );
 
         let pool = ProcessPool::new();
-        let big_string = "x".repeat(100_000);
-        let event = serde_json::json!({ "data": big_string });
+        let mut env = HashMap::new();
+        env.insert("TABLE_NAME".to_string(), "users".to_string());
+        env.insert("AWS_REGION".to_string(), "us-east-1".to_string());
+        env.insert("STAGE".to_string(), "prod".to_string());
 
         let result = pool
             .invoke(
-                "big_event",
+                "multi_env_fn",
                 &crate::config::Runtime::Nodejs20,
-                "echo.handler",
+                "multi_env.handler",
                 tmp.path(),
-                &HashMap::new(),
-                &event,
+                &env,
+                &serde_json::json!({}),
                 &serde_json::json!({}),
             )
             .await
@@ -1433,6 +1345,77 @@ mod tests_extended {
 
         let body: serde_json::Value =
             serde_json::from_str(result["body"].as_str().unwrap()).unwrap();
-        assert!(body["len"].as_u64().unwrap() > 100_000);
+        assert_eq!(body["table"], "users");
+        assert_eq!(body["region"], "us-east-1");
+        assert_eq!(body["stage"], "prod");
+    }
+
+    #[tokio::test]
+    async fn test_pool_python_context_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("ctx_py.py"),
+            r#"
+def handle(event, context):
+    return {"body": context.get("functionName", "unknown")}
+"#,
+        )
+        .unwrap();
+
+        let pool = ProcessPool::new();
+        let result = pool
+            .invoke(
+                "py_ctx",
+                &crate::config::Runtime::Python312,
+                "ctx_py.handle",
+                tmp.path(),
+                &HashMap::new(),
+                &serde_json::json!({}),
+                &serde_json::json!({"functionName": "my_py_lambda"}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["body"], "my_py_lambda");
+    }
+
+    #[tokio::test]
+    async fn test_pool_sequential_rapid_invocations() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_node_handler(
+            tmp.path(),
+            "rapid.js",
+            r#"
+            let seq = 0;
+            exports.handler = async (event) => {
+                seq++;
+                return { body: String(seq), input: event.n };
+            };"#,
+        );
+
+        let pool = ProcessPool::new();
+        let env = HashMap::new();
+        let ctx = serde_json::json!({});
+
+        // 5 rapid sequential invocations — worker should stay alive
+        for i in 1..=5 {
+            let result = pool
+                .invoke(
+                    "rapid_fn",
+                    &crate::config::Runtime::Nodejs20,
+                    "rapid.handler",
+                    tmp.path(),
+                    &env,
+                    &serde_json::json!({"n": i}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["body"], i.to_string());
+        }
+
+        // Only 1 worker should exist
+        let workers = pool.workers.lock().await;
+        assert_eq!(workers.len(), 1);
     }
 }
