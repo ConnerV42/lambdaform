@@ -4439,4 +4439,156 @@ resource "aws_lambda_function" "test" {{
         assert_eq!(parsed["enabled"], true);
         assert_eq!(parsed["debug"], false);
     }
+
+    #[test]
+    fn test_tf_func_join_list() {
+        // join(separator, list) — common Terraform pattern
+        let val = parse_env_var_expr(r#"join(",", ["a", "b", "c"])"#);
+        assert_eq!(val, Some("a,b,c".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_join_dash_separator() {
+        let val = parse_env_var_expr(r#"join("-", ["us", "west", "2"])"#);
+        assert_eq!(val, Some("us-west-2".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_lookup_with_default() {
+        // lookup(map, key, default) — parser can't resolve map, should return default
+        let val = parse_env_var_expr(r#"lookup({ a = "1" }, "missing", "fallback")"#);
+        assert_eq!(val, Some("fallback".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_format_returns_fmt_string() {
+        // format(fmt, args...) — best effort returns the format string
+        let val = parse_env_var_expr(r#"format("api-%s-endpoint", "prod")"#);
+        assert_eq!(val, Some("api-%s-endpoint".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_tolist() {
+        // tolist() should pass through the argument
+        let val = parse_env_var_expr(r#"tolist(["x", "y"])"#);
+        assert!(val.is_some());
+        let parsed: Vec<String> = serde_json::from_str(&val.unwrap()).unwrap();
+        assert_eq!(parsed, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn test_tf_func_toset() {
+        // toset() should pass through the argument (same as tolist for our purposes)
+        let val = parse_env_var_expr(r#"toset(["a", "b"])"#);
+        assert!(val.is_some());
+        let parsed: Vec<String> = serde_json::from_str(&val.unwrap()).unwrap();
+        assert_eq!(parsed, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_tf_func_trim() {
+        let val = parse_env_var_expr(r#"trimspace("  hello  ")"#);
+        assert_eq!(val, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_variable_resolver_multiple_interpolations() {
+        // A string with two variable references: "${var.prefix}-${var.suffix}"
+        let dir = TempDir::new().unwrap();
+        let tf = r#"
+variable "prefix" { default = "api" }
+variable "suffix" { default = "prod" }
+
+resource "aws_lambda_function" "test" {
+  function_name = "${var.prefix}-${var.suffix}-handler"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::123:role/test"
+}
+"#;
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions[0].function_name, "api-prod-handler");
+    }
+
+    #[test]
+    fn test_variable_resolver_missing_var_passthrough() {
+        // When a variable has no default and no tfvars, the interpolation should remain
+        let dir = TempDir::new().unwrap();
+        let tf = r#"
+variable "known" { default = "hello" }
+variable "unknown" {}
+
+resource "aws_lambda_function" "test" {
+  function_name = "${var.known}-${var.unknown}"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::123:role/test"
+}
+"#;
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        // known resolves, unknown stays as-is
+        assert_eq!(config.functions[0].function_name, "hello-${var.unknown}");
+    }
+
+    #[test]
+    fn test_variable_resolver_local_and_var_mixed() {
+        // Mix of var and local references in one string
+        let dir = TempDir::new().unwrap();
+        let tf = r#"
+variable "env" { default = "staging" }
+locals { region = "us-west-2" }
+
+resource "aws_lambda_function" "test" {
+  function_name = "${var.env}-${local.region}-func"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::123:role/test"
+}
+"#;
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions[0].function_name, "staging-us-west-2-func");
+    }
+
+    #[test]
+    fn test_tf_func_jsonencode_null_value() {
+        // jsonencode with a null value
+        let val = parse_env_var_expr(r#"jsonencode({ key = null })"#);
+        assert!(val.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(&val.unwrap()).unwrap();
+        assert!(parsed["key"].is_null());
+    }
+
+    #[test]
+    fn test_tf_func_replace_in_env() {
+        let val = parse_env_var_expr(r#"replace("hello-world", "-", "_")"#);
+        assert_eq!(val, Some("hello_world".to_string()));
+    }
+
+    #[test]
+    fn test_tf_func_coalesce_skips_empty() {
+        // coalesce returns first non-empty argument
+        let val = parse_env_var_expr(r#"coalesce("", "fallback")"#);
+        assert_eq!(val, Some("fallback".to_string()));
+    }
+
+    #[test]
+    fn test_parse_lambda_with_no_environment() {
+        // Lambda with no environment block should have empty env map
+        let dir = TempDir::new().unwrap();
+        let tf = r#"
+resource "aws_lambda_function" "bare" {
+  function_name = "bare-func"
+  handler       = "handler.main"
+  runtime       = "python3.12"
+  role          = "arn:aws:iam::123:role/test"
+}
+"#;
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions.len(), 1);
+        assert!(config.functions[0].environment.is_empty());
+    }
 }
