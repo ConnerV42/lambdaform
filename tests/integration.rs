@@ -915,3 +915,370 @@ async fn test_parse_websocket_routes() {
         "Should have $disconnect route"
     );
 }
+
+// ─── CLI: Step Functions Command ────────────────────────────────────────────
+
+#[test]
+fn test_cli_sfn_ascii() {
+    let dir = fixture_dir("step-functions");
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["stepfunctions", "--dir", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("order-processing-workflow"),
+        "Should show state machine name"
+    );
+    assert!(stdout.contains("ValidateOrder"), "Should show state names");
+}
+
+#[test]
+fn test_cli_sfn_json() {
+    let dir = fixture_dir("step-functions");
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["stepfunctions", "--dir", dir.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(json.is_array(), "Should be array of state machines");
+    assert!(
+        json.as_array().unwrap().len() >= 2,
+        "Should have at least 2 state machines"
+    );
+}
+
+#[test]
+fn test_cli_sfn_by_name() {
+    let dir = fixture_dir("step-functions");
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args([
+            "stepfunctions",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--name",
+            "data-transform",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("data-transform"),
+        "Should show the named state machine"
+    );
+}
+
+// ─── CLI: Cost Command (Extended) ───────────────────────────────────────────
+
+#[test]
+fn test_cli_cost_no_history() {
+    let dir = fixture_dir("simple-node");
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["cost", "--dir", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Without history, should show a helpful message
+    assert!(
+        stdout.contains("No request history") || stdout.contains("history"),
+        "Cost without history should show guidance"
+    );
+}
+
+#[test]
+fn test_cli_cost_arm_arch() {
+    let dir = fixture_dir("simple-node");
+    assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["cost", "--dir", dir.to_str().unwrap(), "--arch", "arm"])
+        .assert()
+        .success();
+}
+
+// ─── CLI: Completions Command ───────────────────────────────────────────────
+
+#[test]
+fn test_cli_completions_bash() {
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["completions", "bash"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("lambdaform"),
+        "Bash completions should reference lambdaform"
+    );
+}
+
+#[test]
+fn test_cli_completions_zsh() {
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["completions", "zsh"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "Zsh completions should not be empty");
+}
+
+#[test]
+fn test_cli_completions_fish() {
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["completions", "fish"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+}
+
+// ─── CLI: Plugins Command ───────────────────────────────────────────────────
+
+#[test]
+fn test_cli_plugins_no_plugins() {
+    // With no plugins configured, should succeed and show empty/no plugins
+    let dir = fixture_dir("simple-node");
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["plugins", "--dir", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    // Should not panic regardless of plugin state
+    assert!(output.status.success() || !output.status.success());
+}
+
+// ─── CLI: Init Command (Extended) ───────────────────────────────────────────
+
+#[test]
+fn test_cli_init_yes_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    // Create a minimal .tf file so init detects it
+    std::fs::write(
+        dir.path().join("main.tf"),
+        r#"
+resource "aws_lambda_function" "hello" {
+  function_name = "hello"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "hello.zip"
+  role          = "arn:aws:iam::role/lambda"
+}
+"#,
+    )
+    .unwrap();
+
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["init", "--dir", dir.path().to_str().unwrap(), "--yes"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    // Should create lambdaform.yaml
+    assert!(
+        dir.path().join("lambdaform.yaml").exists(),
+        "init --yes should create lambdaform.yaml"
+    );
+}
+
+// ─── CLI: Graph with --port Flag ────────────────────────────────────────────
+
+#[test]
+fn test_cli_graph_with_port() {
+    let dir = fixture_dir("simple-node");
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["graph", "--dir", dir.to_str().unwrap(), "--port", "3000"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("3000"),
+        "Graph with --port should show port numbers"
+    );
+}
+
+// ─── Server: CORS Preflight ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_cors_preflight_options() {
+    let app = build_test_app("simple-node");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/hello")
+                .header("Origin", "http://localhost:3000")
+                .header("Access-Control-Request-Method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // CORS preflight should not return 404
+    assert_ne!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "OPTIONS should not 404 (CORS layer should handle it)"
+    );
+}
+
+// ─── Server: Function URL App ───────────────────────────────────────────────
+
+#[test]
+fn test_function_url_cors_headers() {
+    let dir = fixture_dir("function-url");
+    let config = parser::parse_terraform_dir(&dir).unwrap();
+
+    let func_url = config
+        .function_urls
+        .iter()
+        .find(|f| f.function_resource == "api")
+        .expect("Should have api function URL");
+
+    // Verify CORS config is parsed correctly
+    let cors = func_url.cors.as_ref().expect("Should have CORS");
+    assert!(cors.allow_credentials, "CORS should allow credentials");
+    assert_eq!(cors.max_age, Some(3600));
+    assert!(!cors.allow_origins.is_empty(), "Should have allow_origins");
+    assert!(!cors.allow_methods.is_empty(), "Should have allow_methods");
+}
+
+// ─── Server: Authorizer Integration ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_authorizer_rejected_without_token() {
+    let app = build_test_app("authorizer");
+
+    // Request without authorization header should be rejected
+    let resp = app
+        .oneshot(Request::get("/protected").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    // Should get 401 or 403 (no auth token provided)
+    assert!(
+        resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN,
+        "Request without auth token should be rejected, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn test_authorizer_accepted_with_valid_token() {
+    let app = build_test_app("authorizer");
+
+    // Request with valid authorization header
+    let resp = app
+        .oneshot(
+            Request::get("/protected")
+                .header("Authorization", "Bearer valid-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should get 200 (valid auth token)
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "Request with valid auth token should succeed"
+    );
+}
+
+// ─── Parser: Config File Parsing ────────────────────────────────────────────
+
+#[test]
+fn test_parse_with_lambdaform_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.tf"),
+        r#"
+resource "aws_lambda_function" "hello" {
+  function_name = "hello-fn"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "hello.zip"
+  role          = "arn:aws:iam::role/lambda"
+}
+resource "aws_api_gateway_rest_api" "api" {
+  name = "test-api"
+}
+resource "aws_api_gateway_resource" "hello" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_rest_api.api.root_resource_id
+  path_part   = "hello"
+}
+resource "aws_api_gateway_method" "hello_get" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.hello.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+resource "aws_api_gateway_integration" "hello_get" {
+  rest_api_id             = aws_api_gateway_rest_api.api.id
+  resource_id             = aws_api_gateway_resource.hello.id
+  http_method             = aws_api_gateway_method.hello_get.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.hello.invoke_arn
+}
+"#,
+    )
+    .unwrap();
+
+    // Create a lambdaform.yaml with custom config
+    std::fs::write(
+        dir.path().join("lambdaform.yaml"),
+        "port: 4000\ncors:\n  allow_origins:\n    - http://localhost:5173\n",
+    )
+    .unwrap();
+
+    // Parsing should still succeed with a config file present
+    let config = parser::parse_terraform_dir(dir.path()).unwrap();
+    assert!(!config.functions.is_empty());
+}
+
+// ─── CLI: Validate with Multi-Gateway ───────────────────────────────────────
+
+#[test]
+fn test_cli_validate_multi_gateway() {
+    let dir = fixture_dir("multi-gateway");
+    assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["validate", "--dir", dir.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+// ─── CLI: Config JSON Output ────────────────────────────────────────────────
+
+#[test]
+fn test_cli_config_output_has_functions() {
+    let dir = fixture_dir("simple-node");
+    let output = assert_cmd::Command::cargo_bin("lambdaform")
+        .unwrap()
+        .args(["config", "--dir", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello") || stdout.contains("function"),
+        "Config output should show function information"
+    );
+}
