@@ -839,7 +839,7 @@ async fn test_parse_module_var_locals() {
 
 #[tokio::test]
 async fn test_cli_help() {
-    let mut cmd = assert_cmd::Command::cargo_bin("lambdaform").unwrap();
+    let mut cmd = assert_cmd::cargo_bin_cmd!("lambdaform");
     let output = cmd.arg("--help").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -855,7 +855,7 @@ async fn test_cli_help() {
 
 #[tokio::test]
 async fn test_cli_validate_bad_dir() {
-    let mut cmd = assert_cmd::Command::cargo_bin("lambdaform").unwrap();
+    let mut cmd = assert_cmd::cargo_bin_cmd!("lambdaform");
     let output = cmd
         .args(["validate", "--dir", "/tmp/nonexistent-lambdaform-test"])
         .output()
@@ -921,8 +921,7 @@ async fn test_parse_websocket_routes() {
 #[test]
 fn test_cli_sfn_ascii() {
     let dir = fixture_dir("step-functions");
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["stepfunctions", "--dir", dir.to_str().unwrap()])
         .output()
         .unwrap();
@@ -938,8 +937,7 @@ fn test_cli_sfn_ascii() {
 #[test]
 fn test_cli_sfn_json() {
     let dir = fixture_dir("step-functions");
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["stepfunctions", "--dir", dir.to_str().unwrap(), "--json"])
         .output()
         .unwrap();
@@ -956,8 +954,7 @@ fn test_cli_sfn_json() {
 #[test]
 fn test_cli_sfn_by_name() {
     let dir = fixture_dir("step-functions");
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args([
             "stepfunctions",
             "--dir",
@@ -980,8 +977,7 @@ fn test_cli_sfn_by_name() {
 #[test]
 fn test_cli_cost_no_history() {
     let dir = fixture_dir("simple-node");
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["cost", "--dir", dir.to_str().unwrap()])
         .output()
         .unwrap();
@@ -997,8 +993,7 @@ fn test_cli_cost_no_history() {
 #[test]
 fn test_cli_cost_arm_arch() {
     let dir = fixture_dir("simple-node");
-    assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["cost", "--dir", dir.to_str().unwrap(), "--arch", "arm"])
         .assert()
         .success();
@@ -1008,8 +1003,7 @@ fn test_cli_cost_arm_arch() {
 
 #[test]
 fn test_cli_completions_bash() {
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["completions", "bash"])
         .output()
         .unwrap();
@@ -1023,8 +1017,7 @@ fn test_cli_completions_bash() {
 
 #[test]
 fn test_cli_completions_zsh() {
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["completions", "zsh"])
         .output()
         .unwrap();
@@ -1035,8 +1028,7 @@ fn test_cli_completions_zsh() {
 
 #[test]
 fn test_cli_completions_fish() {
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["completions", "fish"])
         .output()
         .unwrap();
@@ -1049,8 +1041,7 @@ fn test_cli_completions_fish() {
 fn test_cli_plugins_no_plugins() {
     // With no plugins configured, should succeed and show empty/no plugins
     let dir = fixture_dir("simple-node");
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["plugins", "--dir", dir.to_str().unwrap()])
         .output()
         .unwrap();
@@ -1078,8 +1069,7 @@ resource "aws_lambda_function" "hello" {
     )
     .unwrap();
 
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["init", "--dir", dir.path().to_str().unwrap(), "--yes"])
         .output()
         .unwrap();
@@ -1096,8 +1086,7 @@ resource "aws_lambda_function" "hello" {
 #[test]
 fn test_cli_graph_with_port() {
     let dir = fixture_dir("simple-node");
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["graph", "--dir", dir.to_str().unwrap(), "--port", "3000"])
         .output()
         .unwrap();
@@ -1258,8 +1247,7 @@ resource "aws_api_gateway_integration" "hello_get" {
 #[test]
 fn test_cli_validate_multi_gateway() {
     let dir = fixture_dir("multi-gateway");
-    assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["validate", "--dir", dir.to_str().unwrap()])
         .assert()
         .success();
@@ -1270,8 +1258,7 @@ fn test_cli_validate_multi_gateway() {
 #[test]
 fn test_cli_config_output_has_functions() {
     let dir = fixture_dir("simple-node");
-    let output = assert_cmd::Command::cargo_bin("lambdaform")
-        .unwrap()
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
         .args(["config", "--dir", dir.to_str().unwrap()])
         .output()
         .unwrap();

@@ -1080,7 +1080,7 @@ mod tests_extended {
 
         // Kill the worker process directly
         {
-            let mut workers = pool.workers.lock().await;
+            let workers = pool.workers.lock().await;
             let key = ("crash_test".to_string(), "index.handler".to_string());
             if let Some(w) = workers.get(&key) {
                 let mut w = w.lock().await;
