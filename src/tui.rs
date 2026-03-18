@@ -408,6 +408,217 @@ pub mod ui {
             format!("…{}", &s[s.len() - max + 1..])
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn make_event(method: &str, path: &str, status: u16, duration_ms: u64) -> RequestEvent {
+            RequestEvent {
+                timestamp: "2026-03-18T01:00:00Z".to_string(),
+                method: method.to_string(),
+                path: path.to_string(),
+                status,
+                duration_ms,
+                function: "test-fn".to_string(),
+                response_bytes: 256,
+            }
+        }
+
+        fn make_server_info() -> ServerInfo {
+            ServerInfo {
+                version: "1.0.3".to_string(),
+                ports: vec![("api".to_string(), 3000)],
+                functions: vec!["hello".to_string()],
+                watching: true,
+            }
+        }
+
+        // --- truncate_path tests ---
+
+        #[test]
+        fn test_truncate_path_short() {
+            assert_eq!(truncate_path("/api/hello", 40), "/api/hello");
+        }
+
+        #[test]
+        fn test_truncate_path_exact() {
+            let s = "x".repeat(40);
+            assert_eq!(truncate_path(&s, 40), s);
+        }
+
+        #[test]
+        fn test_truncate_path_long() {
+            let s = "/api/v1/users/12345/orders/67890/items";
+            let result = truncate_path(s, 20);
+            assert!(result.starts_with('…'));
+            // '…' is 3 bytes UTF-8, plus (max-1) bytes of the tail = 22 bytes total
+            assert_eq!(result.chars().count(), 20); // 20 characters
+                                                    // Verify it took the tail of the original string
+            assert!(s.ends_with(&result[3..])); // skip '…' bytes
+        }
+
+        #[test]
+        fn test_truncate_path_empty() {
+            assert_eq!(truncate_path("", 10), "");
+        }
+
+        // --- App::push_event tests ---
+
+        #[test]
+        fn test_push_event_increments_total() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/", 200, 5));
+            assert_eq!(app.total_requests, 1);
+            assert_eq!(app.total_errors, 0);
+            assert_eq!(app.requests.len(), 1);
+        }
+
+        #[test]
+        fn test_push_event_counts_errors() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/ok", 200, 5));
+            app.push_event(make_event("GET", "/bad", 400, 5));
+            app.push_event(make_event("GET", "/err", 500, 5));
+            app.push_event(make_event("GET", "/redirect", 302, 5));
+            assert_eq!(app.total_requests, 4);
+            assert_eq!(app.total_errors, 2); // 400 + 500
+        }
+
+        #[test]
+        fn test_push_event_buffer_eviction() {
+            let mut app = App::new(make_server_info());
+            // Push 501 events — should evict first 100 when it hits 501
+            for i in 0..501 {
+                app.push_event(make_event("GET", &format!("/{}", i), 200, 1));
+            }
+            assert_eq!(app.total_requests, 501);
+            // Buffer should have been trimmed: 501 pushed, then drain(..100) → 401 remain
+            assert_eq!(app.requests.len(), 401);
+            // First remaining event should be /100 (0-99 were drained)
+            assert_eq!(app.requests[0].path, "/100");
+        }
+
+        #[test]
+        fn test_push_event_auto_scrolls_when_locked() {
+            let mut app = App::new(make_server_info());
+            assert!(app.scroll_locked);
+            app.push_event(make_event("GET", "/1", 200, 5));
+            assert_eq!(app.table_state.selected(), Some(0));
+            app.push_event(make_event("GET", "/2", 200, 5));
+            assert_eq!(app.table_state.selected(), Some(1));
+        }
+
+        // --- Scroll behavior tests ---
+
+        #[test]
+        fn test_scroll_up_unlocks() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/1", 200, 5));
+            app.push_event(make_event("GET", "/2", 200, 5));
+            app.push_event(make_event("GET", "/3", 200, 5));
+            assert!(app.scroll_locked);
+            assert_eq!(app.table_state.selected(), Some(2));
+
+            app.scroll_up();
+            assert!(!app.scroll_locked);
+            assert_eq!(app.table_state.selected(), Some(1));
+        }
+
+        #[test]
+        fn test_scroll_up_stops_at_zero() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/1", 200, 5));
+            app.scroll_locked = false;
+            app.table_state.select(Some(0));
+            app.scroll_up();
+            assert_eq!(app.table_state.selected(), Some(0));
+        }
+
+        #[test]
+        fn test_scroll_down_relocks_at_bottom() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/1", 200, 5));
+            app.push_event(make_event("GET", "/2", 200, 5));
+            app.push_event(make_event("GET", "/3", 200, 5));
+
+            // Manually unlock and go to middle
+            app.scroll_locked = false;
+            app.table_state.select(Some(1));
+
+            app.scroll_down(); // → 2 (last item)
+            assert!(app.scroll_locked); // should re-lock
+            assert_eq!(app.table_state.selected(), Some(2));
+        }
+
+        #[test]
+        fn test_scroll_down_empty() {
+            let mut app = App::new(make_server_info());
+            app.scroll_down(); // should not panic
+            assert_eq!(app.table_state.selected(), None);
+        }
+
+        #[test]
+        fn test_scroll_to_bottom() {
+            let mut app = App::new(make_server_info());
+            for i in 0..10 {
+                app.push_event(make_event("GET", &format!("/{}", i), 200, 1));
+            }
+            app.scroll_locked = false;
+            app.table_state.select(Some(3));
+
+            app.scroll_to_bottom();
+            assert!(app.scroll_locked);
+            assert_eq!(app.table_state.selected(), Some(9));
+        }
+
+        #[test]
+        fn test_scroll_up_with_no_selection() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/1", 200, 5));
+            app.push_event(make_event("GET", "/2", 200, 5));
+            app.table_state.select(None);
+            app.scroll_up();
+            // Should select last item when no selection
+            assert_eq!(app.table_state.selected(), Some(1));
+        }
+
+        #[test]
+        fn test_scroll_down_with_no_selection() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/1", 200, 5));
+            app.table_state.select(None);
+            app.scroll_down();
+            assert_eq!(app.table_state.selected(), Some(0));
+        }
+
+        // --- App initialization ---
+
+        #[test]
+        fn test_app_initial_state() {
+            let app = App::new(make_server_info());
+            assert!(app.scroll_locked);
+            assert_eq!(app.total_requests, 0);
+            assert_eq!(app.total_errors, 0);
+            assert!(app.requests.is_empty());
+            assert_eq!(app.table_state.selected(), None);
+            assert_eq!(app.server_info.version, "1.0.3");
+        }
+
+        #[test]
+        fn test_error_rate_boundary_399() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/", 399, 5));
+            assert_eq!(app.total_errors, 0); // 399 is not an error
+        }
+
+        #[test]
+        fn test_error_rate_boundary_400() {
+            let mut app = App::new(make_server_info());
+            app.push_event(make_event("GET", "/", 400, 5));
+            assert_eq!(app.total_errors, 1); // 400 IS an error
+        }
+    }
 }
 
 /// Create a TUI event channel. Returns (sender, receiver).

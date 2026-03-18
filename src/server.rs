@@ -552,22 +552,22 @@ async fn handle_function_url_request(
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(200) as u16;
 
-            // Emit TUI event
-            #[cfg(feature = "tui")]
-            emit_tui_event(crate::tui::ui::RequestEvent {
-                method: method.to_string(),
-                path: format!("{}{}", path, query_str),
-                status: status_code,
-                duration: elapsed,
-                function: lambda.function_name.clone(),
-                timestamp: chrono::Utc::now(),
-            });
-
             let response_body = response
                 .get("body")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("")
                 .to_string();
+
+            #[cfg(feature = "tui")]
+            emit_tui_event(crate::tui::ui::RequestEvent {
+                timestamp: format_timestamp(),
+                method: method.to_string(),
+                path: format!("{}{}", path, query_str),
+                status: status_code,
+                duration_ms: elapsed.as_millis() as u64,
+                function: lambda.function_name.clone(),
+                response_bytes: response_body.len(),
+            });
 
             tracing::info!(
                 "← {} {}{} → {} ({:.1}ms)",
@@ -628,12 +628,13 @@ async fn handle_function_url_request(
 
             #[cfg(feature = "tui")]
             emit_tui_event(crate::tui::ui::RequestEvent {
+                timestamp: format_timestamp(),
                 method: method.to_string(),
                 path: format!("{}{}", path, query_str),
                 status: 502,
-                duration: elapsed,
+                duration_ms: elapsed.as_millis() as u64,
                 function: lambda.function_name.clone(),
-                timestamp: chrono::Utc::now(),
+                response_bytes: 0,
             });
 
             (
