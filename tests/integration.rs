@@ -1636,3 +1636,321 @@ fn test_graph_dynamodb_fixture() {
         "DynamoDB fixture should show DynamoDB nodes in graph"
     );
 }
+
+// ─── Echo Event Tests (v1 REST API) ────────────────────────────────────────
+// These tests use an echo handler that returns the full Lambda event as JSON,
+// allowing us to verify event construction correctness.
+// Note: body_json(resp) returns the parsed event directly since the handler
+// does body: JSON.stringify(event) which Lambdaform sends as the HTTP response.
+
+/// Verify v1 REST event includes multiValueQueryStringParameters
+#[tokio::test]
+async fn test_v1_multi_value_query_params() {
+    let app = build_test_app("echo-event");
+    let resp = app
+        .oneshot(
+            Request::get("/echo?color=red&color=blue&size=large")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    // v1 should have queryStringParameters
+    assert!(
+        event.get("queryStringParameters").is_some(),
+        "v1 event should have queryStringParameters"
+    );
+
+    // v1 should have multiValueQueryStringParameters
+    let mvq = event
+        .get("multiValueQueryStringParameters")
+        .expect("v1 event should have multiValueQueryStringParameters");
+    assert!(
+        mvq.is_object(),
+        "multiValueQueryStringParameters should be an object"
+    );
+}
+
+/// Verify v1 REST event includes multiValueHeaders
+#[tokio::test]
+async fn test_v1_multi_value_headers() {
+    let app = build_test_app("echo-event");
+    let resp = app
+        .oneshot(
+            Request::get("/echo")
+                .header("x-custom", "val1")
+                .header("accept", "text/html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    // v1 should have multiValueHeaders
+    let mvh = event
+        .get("multiValueHeaders")
+        .expect("v1 event should have multiValueHeaders");
+    assert!(mvh.is_object(), "multiValueHeaders should be an object");
+
+    // Each header value should be an array
+    if let Some(custom) = mvh.get("x-custom") {
+        assert!(
+            custom.is_array(),
+            "Header values in multiValueHeaders should be arrays"
+        );
+    }
+}
+
+/// Verify v1 REST event has correct structure fields
+#[tokio::test]
+async fn test_v1_event_structure() {
+    let app = build_test_app("echo-event");
+    let resp = app
+        .oneshot(
+            Request::post("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"test": true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    // Required v1 fields
+    assert_eq!(event["httpMethod"], "POST");
+    assert!(event.get("path").is_some(), "v1 event should have path");
+    assert!(
+        event.get("headers").is_some(),
+        "v1 event should have headers"
+    );
+    assert!(
+        event.get("requestContext").is_some(),
+        "v1 event should have requestContext"
+    );
+    assert!(
+        event.get("body").is_some(),
+        "POST should have body in event"
+    );
+    assert_eq!(event["isBase64Encoded"], false);
+
+    // requestContext fields
+    let rc = &event["requestContext"];
+    assert!(rc.get("requestId").is_some());
+    assert!(rc.get("stage").is_some());
+    assert!(rc.get("httpMethod").is_some());
+    assert!(rc.get("resourcePath").is_some());
+}
+
+/// Verify v1 REST event body is passed through correctly
+#[tokio::test]
+async fn test_v1_post_body_passthrough() {
+    let app = build_test_app("echo-event");
+    let payload = r#"{"username":"alice","action":"login"}"#;
+    let resp = app
+        .oneshot(
+            Request::post("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    // The event's body field contains the POST body as a string
+    let event_body = event["body"].as_str().unwrap();
+    let parsed_body: serde_json::Value = serde_json::from_str(event_body).unwrap();
+    assert_eq!(parsed_body["username"], "alice");
+    assert_eq!(parsed_body["action"], "login");
+}
+
+/// Verify v1 REST event path parameters are extracted
+#[tokio::test]
+async fn test_v1_path_parameters() {
+    let app = build_test_app("echo-event");
+    let resp = app
+        .oneshot(
+            Request::get("/echo/users/42/posts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    // proxy+ should capture the rest of the path
+    assert!(
+        event.get("pathParameters").is_some(),
+        "Should have pathParameters for proxy+ route"
+    );
+}
+
+// ─── Echo Event Tests (v2 HTTP API) ────────────────────────────────────────
+
+/// Verify v2 HTTP API event includes cookies when Cookie header is sent
+#[tokio::test]
+async fn test_v2_cookies_extraction() {
+    let app = build_test_app("echo-event-v2");
+    let resp = app
+        .oneshot(
+            Request::get("/echo")
+                .header("cookie", "session=abc123; theme=dark; lang=en")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    // v2 event should have cookies array
+    let cookies = event
+        .get("cookies")
+        .expect("v2 event should have cookies when Cookie header is present");
+    assert!(cookies.is_array(), "cookies should be an array");
+    let cookies_arr = cookies.as_array().unwrap();
+    assert_eq!(cookies_arr.len(), 3, "Should have 3 cookies");
+
+    // Verify individual cookies are trimmed
+    let cookie_strs: Vec<&str> = cookies_arr.iter().map(|c| c.as_str().unwrap()).collect();
+    assert!(cookie_strs.contains(&"session=abc123"));
+    assert!(cookie_strs.contains(&"theme=dark"));
+    assert!(cookie_strs.contains(&"lang=en"));
+}
+
+/// Verify v2 event has version 2.0 and correct structure
+#[tokio::test]
+async fn test_v2_event_structure_full() {
+    let app = build_test_app("echo-event-v2");
+    let resp = app
+        .oneshot(
+            Request::post("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"action":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    // v2 required fields
+    assert_eq!(event["version"], "2.0");
+    assert!(event.get("routeKey").is_some(), "v2 should have routeKey");
+    assert!(event.get("rawPath").is_some(), "v2 should have rawPath");
+    assert!(
+        event.get("rawQueryString").is_some(),
+        "v2 should have rawQueryString"
+    );
+    assert!(event.get("headers").is_some(), "v2 should have headers");
+    assert_eq!(event["isBase64Encoded"], false);
+
+    // requestContext structure
+    let rc = &event["requestContext"];
+    assert!(rc.get("requestId").is_some());
+    assert!(rc.get("apiId").is_some());
+    assert!(rc.get("domainName").is_some());
+    assert!(rc.get("stage").is_some());
+    assert!(rc.get("time").is_some());
+    assert!(rc.get("timeEpoch").is_some());
+
+    // requestContext.http
+    let http = &rc["http"];
+    assert_eq!(http["method"], "POST");
+    assert!(http.get("path").is_some());
+    assert!(http.get("protocol").is_some());
+    assert!(http.get("sourceIp").is_some());
+}
+
+/// Verify v2 event rawQueryString format
+#[tokio::test]
+async fn test_v2_raw_query_string() {
+    let app = build_test_app("echo-event-v2");
+    let resp = app
+        .oneshot(
+            Request::get("/echo?page=1&limit=10&sort=name")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    let raw_qs = event["rawQueryString"].as_str().unwrap();
+    assert!(!raw_qs.is_empty(), "rawQueryString should not be empty");
+    // Should contain key=value pairs
+    assert!(raw_qs.contains("page=1"));
+    assert!(raw_qs.contains("limit=10"));
+    assert!(raw_qs.contains("sort=name"));
+
+    // queryStringParameters should also be present
+    let qsp = &event["queryStringParameters"];
+    assert_eq!(qsp["page"], "1");
+    assert_eq!(qsp["limit"], "10");
+}
+
+/// Verify v2 event has no cookies field when no Cookie header sent
+#[tokio::test]
+async fn test_v2_no_cookies_when_absent() {
+    let app = build_test_app("echo-event-v2");
+    let resp = app
+        .oneshot(Request::get("/echo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let event = body_json(resp).await;
+
+    // cookies should be null/absent when no Cookie header
+    let cookies = event.get("cookies");
+    assert!(
+        cookies.is_none() || cookies.unwrap().is_null(),
+        "cookies should be absent when no Cookie header sent"
+    );
+}
+
+/// Verify echo-event and echo-event-v2 fixtures validate
+#[test]
+fn test_cli_validate_echo_event() {
+    let dir = fixture_dir("echo-event");
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
+        .args(["validate", "--dir", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "echo-event fixture should validate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_cli_validate_echo_event_v2() {
+    let dir = fixture_dir("echo-event-v2");
+    let output = assert_cmd::cargo_bin_cmd!("lambdaform")
+        .args(["validate", "--dir", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "echo-event-v2 fixture should validate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

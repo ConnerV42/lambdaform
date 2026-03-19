@@ -29,6 +29,7 @@
 - [Cost Estimation](./guide/cost-estimation.md)
 - [Infrastructure Graph](./graph.md)
 - [Troubleshooting](./guide/troubleshooting.md)
+- [Examples & Cookbook](./guide/examples.md)
 - [FAQ](./guide/faq.md)
 
 # Advanced
