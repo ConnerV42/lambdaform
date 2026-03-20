@@ -89,8 +89,8 @@ $ curl -s localhost:3000/hello?name=World | jq .
 
 | Runtime | Status | Invocation |
 |---------|--------|------------|
-| Node.js 18.x / 20.x | ✅ | Warm pool (~3ms) |
-| Python 3.10 / 3.11 / 3.12 | ✅ | Warm pool (~3ms) |
+| Node.js 18.x / 20.x / 22.x | ✅ | Warm pool (~3ms) |
+| Python 3.10 / 3.11 / 3.12 / 3.13 | ✅ | Warm pool (~3ms) |
 | Go 1.x / provided.al2 / provided.al2023 | ✅ | Mini RIE (~14ms) |
 | Rust (provided.al2023) | ✅ | Mini RIE (~14ms) |
 | Java 8/11/17/21 | ✅ | Docker (~500ms) |

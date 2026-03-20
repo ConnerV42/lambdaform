@@ -1,5 +1,42 @@
 # Changelog
 
+## v1.0.4 — Test Coverage & Documentation (2026-03-20)
+
+**Bug fixes:**
+- Graceful fallback for invalid architecture strings in Terraform parser
+- Resolve function calls, numbers, and bools in Lambda environment variables (not just strings)
+- Update README runtime table to include Node.js 22.x and Python 3.13
+
+**Documentation:**
+- New Examples & Cookbook page with quick-start snippets for all 18 example projects
+- New Cost Estimation guide page
+- New Function URLs guide page with full Terraform examples
+- Expanded CLI reference with all subcommands documented
+- Updated runtimes page with Node.js 22.x, Python 3.13, Rust, and Java
+- Updated architecture overview mentioning Rust and Java runtimes
+
+**Test coverage (148 new tests — 521 total, up from 377):**
+- 11 event format integration tests (v1 multi-value params/headers, v2 cookies, event structure)
+- 18 TUI unit tests with feature-gated compilation fix
+- 21 CLI integration tests (graph formats, cost, step functions, validate, replay)
+- 18 CLI integration tests (CORS, authorizer, config, completions)
+- 14 parser tests (Terraform functions: join/lookup/format/tolist/toset/trim, coalesce, jsonencode null)
+- 10 graph module tests (DynamoDB streams, env refs, layers, WebSocket, ASCII/DOT/JSON formats)
+- 13 router and history edge case tests
+- 10 trigger tests (SQS attributes, FIFO fields, SNS format, timestamps)
+- 9 runtime tests (v2 events, context, authorizer, pool logic, binary checks)
+- 8 pool error handling tests (import errors, crash respawn, missing handlers)
+- 7 pool concurrency tests (worker reuse, invalidate, concurrent, large payload)
+- 5 step functions edge case tests
+- Format timestamp / civil_from_days coverage
+
+**Maintenance:**
+- Updated 54 dependencies
+- Fixed deprecation warnings (assert_cmd cargo_bin_cmd! macro)
+- Removed unused mut bindings
+- New function-urls example project
+- New echo-event and echo-event-v2 test fixtures
+
 ## v1.0.3 — Dogfooding & Hardening (2026-02-27)
 
 **Bug fixes:**
