@@ -388,6 +388,27 @@ fn expr_to_json_value(expr: &hcl::Expression) -> serde_json::Value {
                 serde_json::Value::Null
             }
         }
+        hcl::Expression::Traversal(traversal) => {
+            // Convert traversals to ${var.xxx} / ${local.xxx} placeholders
+            // so they can be resolved later by resolve_locals() / resolve()
+            let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                .chain(traversal.operators.iter().map(|op| match op {
+                    hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                    hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                    _ => String::new(),
+                }))
+                .collect();
+            let traversal_str = parts.join(".");
+            serde_json::Value::String(format!("${{{}}}", traversal_str))
+        }
+        hcl::Expression::Conditional(_cond) => {
+            // Best effort: try to evaluate simple conditionals, else return placeholder
+            if let Some(s) = expr_to_string(expr) {
+                serde_json::Value::String(s)
+            } else {
+                serde_json::Value::Null
+            }
+        }
         _ => serde_json::Value::Null,
     }
 }
@@ -2299,7 +2320,8 @@ fn get_number_attr(body: &hcl::Body, name: &str) -> Option<u32> {
         })
 }
 
-/// Extract environment variables from Lambda resource with variable resolution
+/// Extract environment variables from Lambda resource with variable resolution.
+/// Handles both direct object literals and merge() function calls.
 fn extract_environment_resolved(
     body: &hcl::Body,
     resolver: &VariableResolver,
@@ -2311,56 +2333,105 @@ fn extract_environment_resolved(
         if identifier == "environment" {
             for attr in block.body.attributes() {
                 if attr.key.to_string() == "variables" {
-                    if let hcl::Expression::Object(obj) = &attr.expr {
-                        for (key, value) in obj.iter() {
-                            if let hcl::ObjectKey::Identifier(k) = key {
-                                let resolved_value = match value {
-                                    hcl::Expression::String(v) => Some(resolver.resolve(v)),
-                                    hcl::Expression::TemplateExpr(t) => {
-                                        Some(resolver.resolve(&t.to_string()))
-                                    }
-                                    hcl::Expression::Traversal(traversal) => {
-                                        let parts: Vec<String> =
-                                            std::iter::once(traversal.expr.to_string())
-                                                .chain(traversal.operators.iter().map(
-                                                    |op| match op {
-                                                        hcl::TraversalOperator::GetAttr(ident) => {
-                                                            ident.to_string()
-                                                        }
-                                                        hcl::TraversalOperator::Index(expr) => {
-                                                            format!("{}", expr)
-                                                        }
-                                                        _ => String::new(),
-                                                    },
-                                                ))
-                                                .collect();
-                                        let traversal_str = parts.join(".");
-                                        // Try var.xxx resolution first, fall back to
-                                        // storing the raw traversal as a placeholder
-                                        // for cross-resource resolution in post-parse step
-                                        Some(
-                                            resolver
-                                                .resolve_traversal(&traversal_str)
-                                                .unwrap_or_else(|| {
-                                                    format!("${{{}}}", traversal_str)
-                                                }),
-                                        )
-                                    }
-                                    // FuncCall, Number, Bool, Array, Object, etc.
-                                    other => expr_to_string(other),
-                                };
-                                if let Some(val) = resolved_value {
-                                    env.insert(k.to_string(), val);
-                                }
-                            }
-                        }
-                    }
+                    extract_env_vars_from_expr(&attr.expr, resolver, &mut env);
                 }
             }
         }
     }
 
     env
+}
+
+/// Extract environment variables from an HCL expression.
+/// Handles Object literals, merge() calls, and Traversals to locals that contain objects.
+fn extract_env_vars_from_expr(
+    expr: &hcl::Expression,
+    resolver: &VariableResolver,
+    env: &mut HashMap<String, String>,
+) {
+    match expr {
+        hcl::Expression::Object(obj) => {
+            extract_env_vars_from_object(obj, resolver, env);
+        }
+        hcl::Expression::FuncCall(func_call) => {
+            let name = func_call.name.to_string();
+            if name == "merge" {
+                // merge(map1, map2, ...) — process each argument in order,
+                // later values override earlier ones (Terraform merge semantics)
+                for arg in &func_call.args {
+                    extract_env_vars_from_expr(arg, resolver, env);
+                }
+            }
+        }
+        hcl::Expression::Traversal(traversal) => {
+            // e.g., local.common_env — resolve and parse as JSON object
+            let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                .chain(traversal.operators.iter().map(|op| match op {
+                    hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                    hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                    _ => String::new(),
+                }))
+                .collect();
+            let traversal_str = parts.join(".");
+            if let Some(val) = resolver.resolve_traversal(&traversal_str) {
+                // Try to parse as JSON object (locals with object values are stored as JSON strings)
+                let resolved = resolver.resolve(&val);
+                if let Ok(map) =
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&resolved)
+                {
+                    for (k, v) in map {
+                        let str_val = match v {
+                            serde_json::Value::String(s) => resolver.resolve(&s),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            serde_json::Value::Null => "null".to_string(),
+                            other => other.to_string(),
+                        };
+                        env.insert(k, str_val);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract key-value pairs from an HCL Object expression into the env map.
+fn extract_env_vars_from_object(
+    obj: &hcl::expr::Object<hcl::expr::ObjectKey, hcl::Expression>,
+    resolver: &VariableResolver,
+    env: &mut HashMap<String, String>,
+) {
+    for (key, value) in obj.iter() {
+        if let hcl::ObjectKey::Identifier(k) = key {
+            let resolved_value = match value {
+                hcl::Expression::String(v) => Some(resolver.resolve(v)),
+                hcl::Expression::TemplateExpr(t) => Some(resolver.resolve(&t.to_string())),
+                hcl::Expression::Traversal(traversal) => {
+                    let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                        .chain(traversal.operators.iter().map(|op| match op {
+                            hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                            hcl::TraversalOperator::Index(expr) => {
+                                format!("{}", expr)
+                            }
+                            _ => String::new(),
+                        }))
+                        .collect();
+                    let traversal_str = parts.join(".");
+                    Some(
+                        resolver
+                            .resolve_traversal(&traversal_str)
+                            .unwrap_or_else(|| format!("${{{}}}", traversal_str)),
+                    )
+                }
+                // FuncCall, Number, Bool, Array, Object, etc.
+                other => expr_to_string(other),
+            };
+            if let Some(val) = resolved_value {
+                env.insert(k.to_string(), val);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4590,5 +4661,145 @@ resource "aws_lambda_function" "bare" {
         let config = parse_terraform_dir(dir.path()).unwrap();
         assert_eq!(config.functions.len(), 1);
         assert!(config.functions[0].environment.is_empty());
+    }
+
+    #[test]
+    fn test_merge_env_vars_with_locals() {
+        // merge(local.common_env, { EXTRA = "val" }) should produce all merged env vars
+        let dir = TempDir::new().unwrap();
+        let tf = r#"
+variable "environment" {
+  default = "dev"
+}
+
+variable "aws_region" {
+  default = "us-west-2"
+}
+
+locals {
+  common_env = {
+    ENVIRONMENT = var.environment
+    REGION      = var.aws_region
+    TABLE_NAME  = "my-table"
+  }
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api-func"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::123:role/test"
+  filename      = "lambda.zip"
+
+  environment {
+    variables = merge(local.common_env, {
+      EXTRA_VAR = "extra-value"
+      OVERRIDE  = "from-inline"
+    })
+  }
+}
+"#;
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        assert_eq!(config.functions.len(), 1);
+        let func = &config.functions[0];
+        // From local.common_env
+        assert_eq!(
+            func.environment.get("ENVIRONMENT"),
+            Some(&"dev".to_string())
+        );
+        assert_eq!(
+            func.environment.get("REGION"),
+            Some(&"us-west-2".to_string())
+        );
+        assert_eq!(
+            func.environment.get("TABLE_NAME"),
+            Some(&"my-table".to_string())
+        );
+        // From inline object
+        assert_eq!(
+            func.environment.get("EXTRA_VAR"),
+            Some(&"extra-value".to_string())
+        );
+        assert_eq!(
+            func.environment.get("OVERRIDE"),
+            Some(&"from-inline".to_string())
+        );
+    }
+
+    #[test]
+    fn test_merge_env_vars_override_order() {
+        // merge(map1, map2) — map2 values override map1 (Terraform semantics)
+        let dir = TempDir::new().unwrap();
+        let tf = r#"
+locals {
+  base = {
+    KEY1 = "from-base"
+    KEY2 = "from-base"
+  }
+}
+
+resource "aws_lambda_function" "test" {
+  function_name = "test-func"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::123:role/test"
+
+  environment {
+    variables = merge(local.base, {
+      KEY2 = "overridden"
+      KEY3 = "new-key"
+    })
+  }
+}
+"#;
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        assert_eq!(func.environment.get("KEY1"), Some(&"from-base".to_string()));
+        assert_eq!(
+            func.environment.get("KEY2"),
+            Some(&"overridden".to_string())
+        );
+        assert_eq!(func.environment.get("KEY3"), Some(&"new-key".to_string()));
+    }
+
+    #[test]
+    fn test_merge_three_maps() {
+        // merge(map1, map2, map3) — three-way merge
+        let dir = TempDir::new().unwrap();
+        let tf = r#"
+locals {
+  base = {
+    A = "1"
+    B = "1"
+  }
+  extra = {
+    B = "2"
+    C = "2"
+  }
+}
+
+resource "aws_lambda_function" "test" {
+  function_name = "test-func"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::123:role/test"
+
+  environment {
+    variables = merge(local.base, local.extra, {
+      C = "3"
+      D = "3"
+    })
+  }
+}
+"#;
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        assert_eq!(func.environment.get("A"), Some(&"1".to_string()));
+        assert_eq!(func.environment.get("B"), Some(&"2".to_string())); // overridden by extra
+        assert_eq!(func.environment.get("C"), Some(&"3".to_string())); // overridden by inline
+        assert_eq!(func.environment.get("D"), Some(&"3".to_string()));
     }
 }
