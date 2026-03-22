@@ -179,16 +179,22 @@ impl VariableResolver {
     }
 
     /// Collect local values from `locals` blocks.
+    /// Uses the resolver (with already-loaded variables) to evaluate conditionals.
     fn collect_locals(&mut self, body: &hcl::Body) {
+        // Collect attributes first, then insert (avoids borrow issues with &self)
+        let mut new_locals = Vec::new();
         for block in body.blocks() {
             if block.identifier.to_string() == "locals" {
                 for attr in block.body.attributes() {
                     let key = attr.key.to_string();
-                    if let Some(val) = expr_to_string(&attr.expr) {
-                        self.locals.insert(key, val);
+                    if let Some(val) = expr_to_string_opt(&attr.expr, Some(self)) {
+                        new_locals.push((key, val));
                     }
                 }
             }
+        }
+        for (key, val) in new_locals {
+            self.locals.insert(key, val);
         }
     }
 
@@ -252,11 +258,29 @@ impl VariableResolver {
 
 /// Extract a string value from an HCL expression (for variable defaults and tfvars).
 fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
+    expr_to_string_opt(expr, None)
+}
+
+/// Resolve an expression to a string, optionally using a VariableResolver
+/// to evaluate variable/local references (needed for conditional evaluation).
+fn expr_to_string_opt(
+    expr: &hcl::Expression,
+    resolver: Option<&VariableResolver>,
+) -> Option<String> {
     match expr {
         hcl::Expression::String(s) => Some(s.to_string()),
         hcl::Expression::Number(n) => Some(n.to_string()),
         hcl::Expression::Bool(b) => Some(b.to_string()),
-        hcl::Expression::TemplateExpr(t) => Some(t.to_string()),
+        hcl::Expression::TemplateExpr(t) => {
+            let raw = t.to_string();
+            // If we have a resolver and the template has interpolations, resolve them
+            if let Some(r) = resolver {
+                let resolved = r.resolve(&raw);
+                Some(resolved)
+            } else {
+                Some(raw)
+            }
+        }
         hcl::Expression::FuncCall(func_call) => expr_func_call_to_string(func_call),
         hcl::Expression::Array(items) => {
             let json_items: Vec<serde_json::Value> = items.iter().map(expr_to_json_value).collect();
@@ -266,6 +290,98 @@ fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
             let json_obj = hcl_object_to_json(obj);
             serde_json::to_string(&json_obj).ok()
         }
+        hcl::Expression::Conditional(cond) => {
+            match eval_condition(&cond.cond_expr, resolver) {
+                Some(true) => expr_to_string_opt(&cond.true_expr, resolver),
+                Some(false) => expr_to_string_opt(&cond.false_expr, resolver),
+                // Can't evaluate condition — try true branch as best effort
+                None => expr_to_string_opt(&cond.true_expr, resolver)
+                    .or_else(|| expr_to_string_opt(&cond.false_expr, resolver)),
+            }
+        }
+        hcl::Expression::Traversal(traversal) => {
+            // With a resolver, try to resolve var.xxx / local.xxx references
+            if let Some(r) = resolver {
+                let parts: Vec<String> = std::iter::once(traversal.expr.to_string())
+                    .chain(traversal.operators.iter().map(|op| match op {
+                        hcl::TraversalOperator::GetAttr(ident) => ident.to_string(),
+                        hcl::TraversalOperator::Index(expr) => format!("{}", expr),
+                        _ => String::new(),
+                    }))
+                    .collect();
+                let traversal_str = parts.join(".");
+                r.resolve_traversal(&traversal_str)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Evaluate a boolean condition expression. Returns Some(true/false) if we can
+/// evaluate it, None if we can't (e.g., unresolved variable references).
+fn eval_condition(expr: &hcl::Expression, resolver: Option<&VariableResolver>) -> Option<bool> {
+    match expr {
+        hcl::Expression::Bool(b) => Some(*b),
+        hcl::Expression::Operation(op) => match op.as_ref() {
+            hcl::expr::Operation::Binary(bin_op) => {
+                use hcl::expr::BinaryOperator;
+                let lhs = expr_to_string_opt(&bin_op.lhs_expr, resolver);
+                let rhs = expr_to_string_opt(&bin_op.rhs_expr, resolver);
+                match (lhs, rhs) {
+                    (Some(l), Some(r)) => match bin_op.operator {
+                        BinaryOperator::Eq => Some(l == r),
+                        BinaryOperator::NotEq => Some(l != r),
+                        BinaryOperator::Less
+                        | BinaryOperator::LessEq
+                        | BinaryOperator::Greater
+                        | BinaryOperator::GreaterEq => {
+                            // Try numeric comparison first, then string
+                            let ln = l.parse::<f64>();
+                            let rn = r.parse::<f64>();
+                            match (ln, rn) {
+                                (Ok(ln), Ok(rn)) => match bin_op.operator {
+                                    BinaryOperator::Less => Some(ln < rn),
+                                    BinaryOperator::LessEq => Some(ln <= rn),
+                                    BinaryOperator::Greater => Some(ln > rn),
+                                    BinaryOperator::GreaterEq => Some(ln >= rn),
+                                    _ => None,
+                                },
+                                _ => match bin_op.operator {
+                                    BinaryOperator::Less => Some(l < r),
+                                    BinaryOperator::LessEq => Some(l <= r),
+                                    BinaryOperator::Greater => Some(l > r),
+                                    BinaryOperator::GreaterEq => Some(l >= r),
+                                    _ => None,
+                                },
+                            }
+                        }
+                        BinaryOperator::And => {
+                            let lb = l.parse::<bool>().ok()?;
+                            let rb = r.parse::<bool>().ok()?;
+                            Some(lb && rb)
+                        }
+                        BinaryOperator::Or => {
+                            let lb = l.parse::<bool>().ok()?;
+                            let rb = r.parse::<bool>().ok()?;
+                            Some(lb || rb)
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            hcl::expr::Operation::Unary(un_op) => {
+                use hcl::expr::UnaryOperator;
+                match un_op.operator {
+                    UnaryOperator::Neg => eval_condition(&un_op.expr, resolver).map(|b| !b),
+                    _ => None,
+                }
+            }
+        },
+        // Parenthesized expression
+        hcl::Expression::Parenthesis(inner) => eval_condition(inner, resolver),
         _ => None,
     }
 }
@@ -401,12 +517,20 @@ fn expr_to_json_value(expr: &hcl::Expression) -> serde_json::Value {
             let traversal_str = parts.join(".");
             serde_json::Value::String(format!("${{{}}}", traversal_str))
         }
-        hcl::Expression::Conditional(_cond) => {
-            // Best effort: try to evaluate simple conditionals, else return placeholder
-            if let Some(s) = expr_to_string(expr) {
-                serde_json::Value::String(s)
-            } else {
-                serde_json::Value::Null
+        hcl::Expression::Conditional(cond) => {
+            match eval_condition(&cond.cond_expr, None) {
+                Some(true) => expr_to_json_value(&cond.true_expr),
+                Some(false) => expr_to_json_value(&cond.false_expr),
+                // Can't evaluate condition — try to get a string from either branch
+                None => {
+                    if let Some(s) = expr_to_string(&cond.true_expr) {
+                        serde_json::Value::String(s)
+                    } else if let Some(s) = expr_to_string(&cond.false_expr) {
+                        serde_json::Value::String(s)
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
             }
         }
         _ => serde_json::Value::Null,
@@ -3435,6 +3559,190 @@ resource "aws_lambda_function" "worker" {
             func.function_name,
             "arn:aws:lambda:us-west-2:123456789-worker"
         );
+    }
+
+    #[test]
+    fn test_conditional_string_equality() {
+        // var.environment == "prod" ? "warn" : "debug"
+        let tf_content = r#"
+variable "environment" {
+  default = "dev"
+}
+
+locals {
+  log_level = var.environment == "prod" ? "warn" : "debug"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "lambda.zip"
+
+  environment {
+    variables = {
+      LOG_LEVEL = local.log_level
+    }
+  }
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        // var.environment defaults to "dev", which != "prod", so false branch: "debug"
+        assert_eq!(func.environment.get("LOG_LEVEL").unwrap(), "debug");
+    }
+
+    #[test]
+    fn test_conditional_true_branch() {
+        let tf_content = r#"
+variable "environment" {
+  default = "prod"
+}
+
+locals {
+  log_level = var.environment == "prod" ? "warn" : "debug"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "lambda.zip"
+
+  environment {
+    variables = {
+      LOG_LEVEL = local.log_level
+    }
+  }
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        assert_eq!(func.environment.get("LOG_LEVEL").unwrap(), "warn");
+    }
+
+    #[test]
+    fn test_conditional_not_equal() {
+        let tf_content = r#"
+variable "environment" {
+  default = "prod"
+}
+
+locals {
+  is_debug = var.environment != "prod" ? "true" : "false"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "lambda.zip"
+
+  environment {
+    variables = {
+      IS_DEBUG = local.is_debug
+    }
+  }
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        // "prod" != "prod" is false, so false branch: "false"
+        assert_eq!(func.environment.get("IS_DEBUG").unwrap(), "false");
+    }
+
+    #[test]
+    fn test_conditional_numeric_comparison() {
+        let tf_content = r#"
+variable "timeout" {
+  default = 30
+}
+
+locals {
+  timeout_category = var.timeout > 10 ? "long" : "short"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "lambda.zip"
+
+  environment {
+    variables = {
+      TIMEOUT_CAT = local.timeout_category
+    }
+  }
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        // 30 > 10 is true, so "long"
+        assert_eq!(func.environment.get("TIMEOUT_CAT").unwrap(), "long");
+    }
+
+    #[test]
+    fn test_conditional_bool_literal() {
+        let tf_content = r#"
+locals {
+  always_true = true ? "yes" : "no"
+  always_false = false ? "yes" : "no"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "lambda.zip"
+
+  environment {
+    variables = {
+      TRUE_RESULT  = local.always_true
+      FALSE_RESULT = local.always_false
+    }
+  }
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        assert_eq!(func.environment.get("TRUE_RESULT").unwrap(), "yes");
+        assert_eq!(func.environment.get("FALSE_RESULT").unwrap(), "no");
+    }
+
+    #[test]
+    fn test_conditional_in_function_name() {
+        // Conditionals can appear anywhere, not just in env vars
+        let tf_content = r#"
+variable "environment" {
+  default = "staging"
+}
+
+locals {
+  prefix = var.environment == "prod" ? "production" : "dev"
+}
+
+resource "aws_lambda_function" "api" {
+  function_name = "${local.prefix}-api"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  filename      = "lambda.zip"
+}
+"#;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.tf"), tf_content).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        assert_eq!(func.function_name, "dev-api");
     }
 
     #[test]
