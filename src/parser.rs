@@ -467,7 +467,869 @@ fn expr_func_call_to_string(func_call: &hcl::expr::FuncCall) -> Option<String> {
             .first()
             .and_then(expr_to_string)
             .map(|s| s.trim().to_string()),
+        "trimprefix" => {
+            // trimprefix(string, prefix)
+            if let (Some(s), Some(prefix)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                Some(s.strip_prefix(prefix.as_str()).unwrap_or(&s).to_string())
+            } else {
+                None
+            }
+        }
+        "trimsuffix" => {
+            // trimsuffix(string, suffix)
+            if let (Some(s), Some(suffix)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                Some(s.strip_suffix(suffix.as_str()).unwrap_or(&s).to_string())
+            } else {
+                None
+            }
+        }
+        "chomp" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .map(|s| s.trim_end_matches('\n').trim_end_matches('\r').to_string()),
+        "title" => func_call.args.first().and_then(expr_to_string).map(|s| {
+            s.split_whitespace()
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }),
+        "split" => {
+            // split(separator, string) → JSON array string
+            if let (Some(sep), Some(s)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                let parts: Vec<&str> = s.split(&sep).collect();
+                serde_json::to_string(&parts).ok()
+            } else {
+                None
+            }
+        }
+        "substr" => {
+            // substr(string, offset, length)
+            if let (Some(s), Some(offset_str), Some(len_str)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+                func_call.args.get(2).and_then(expr_to_string),
+            ) {
+                let offset = offset_str.parse::<usize>().ok()?;
+                let len = len_str.parse::<i64>().ok()?;
+                let chars: Vec<char> = s.chars().collect();
+                if offset >= chars.len() {
+                    return Some(String::new());
+                }
+                let end = if len < 0 {
+                    chars.len()
+                } else {
+                    (offset + len as usize).min(chars.len())
+                };
+                Some(chars[offset..end].iter().collect())
+            } else {
+                None
+            }
+        }
+        "startswith" => {
+            // startswith(string, prefix) → "true"/"false"
+            if let (Some(s), Some(prefix)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                Some(s.starts_with(&prefix).to_string())
+            } else {
+                None
+            }
+        }
+        "endswith" => {
+            // endswith(string, suffix) → "true"/"false"
+            if let (Some(s), Some(suffix)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                Some(s.ends_with(&suffix).to_string())
+            } else {
+                None
+            }
+        }
+        "concat" => {
+            // concat(list1, list2, ...) → merged JSON array string
+            let mut result: Vec<serde_json::Value> = Vec::new();
+            for arg in &func_call.args {
+                if let Some(s) = expr_to_string(arg) {
+                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&s) {
+                        result.extend(arr);
+                    } else {
+                        result.push(serde_json::Value::String(s));
+                    }
+                } else {
+                    // Try to convert directly from array expression
+                    let val = expr_to_json_value(arg);
+                    if let serde_json::Value::Array(arr) = val {
+                        result.extend(arr);
+                    }
+                }
+            }
+            serde_json::to_string(&result).ok()
+        }
+        "flatten" => {
+            // flatten(list_of_lists) → flattened JSON array
+            if let Some(arg) = func_call.args.first() {
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Array(outer) = val {
+                    let mut flat = Vec::new();
+                    for item in outer {
+                        if let serde_json::Value::Array(inner) = item {
+                            flat.extend(inner);
+                        } else {
+                            flat.push(item);
+                        }
+                    }
+                    serde_json::to_string(&flat).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "compact" => {
+            // compact(list) → remove empty strings
+            if let Some(arg) = func_call.args.first() {
+                if let Some(s) = expr_to_string(arg) {
+                    if let Ok(arr) = serde_json::from_str::<Vec<String>>(&s) {
+                        let filtered: Vec<&String> = arr.iter().filter(|s| !s.is_empty()).collect();
+                        return serde_json::to_string(&filtered).ok();
+                    }
+                }
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Array(arr) = val {
+                    let filtered: Vec<_> = arr
+                        .into_iter()
+                        .filter(|v| !matches!(v, serde_json::Value::String(s) if s.is_empty()))
+                        .collect();
+                    serde_json::to_string(&filtered).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "distinct" => {
+            // distinct(list) → remove duplicates preserving order
+            if let Some(arg) = func_call.args.first() {
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Array(arr) = val {
+                    let mut seen = Vec::new();
+                    for item in arr {
+                        if !seen.contains(&item) {
+                            seen.push(item);
+                        }
+                    }
+                    serde_json::to_string(&seen).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "sort" => {
+            // sort(list) → sorted string list
+            if let Some(arg) = func_call.args.first() {
+                if let Some(s) = expr_to_string(arg) {
+                    if let Ok(mut arr) = serde_json::from_str::<Vec<String>>(&s) {
+                        arr.sort();
+                        return serde_json::to_string(&arr).ok();
+                    }
+                }
+                None
+            } else {
+                None
+            }
+        }
+        "reverse" => {
+            // reverse(list) → reversed list
+            if let Some(arg) = func_call.args.first() {
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Array(mut arr) = val {
+                    arr.reverse();
+                    serde_json::to_string(&arr).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "length" => {
+            // length(value) → count as string
+            if let Some(arg) = func_call.args.first() {
+                if let Some(s) = expr_to_string(arg) {
+                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&s) {
+                        return Some(arr.len().to_string());
+                    }
+                    if let Ok(obj) =
+                        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s)
+                    {
+                        return Some(obj.len().to_string());
+                    }
+                    // String length
+                    return Some(s.len().to_string());
+                }
+                let val = expr_to_json_value(arg);
+                match val {
+                    serde_json::Value::Array(arr) => Some(arr.len().to_string()),
+                    serde_json::Value::Object(obj) => Some(obj.len().to_string()),
+                    serde_json::Value::String(s) => Some(s.len().to_string()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        "contains" => {
+            // contains(list, value) → "true"/"false"
+            if let (Some(list_str), Some(val)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(&list_str) {
+                    return Some(arr.contains(&val).to_string());
+                }
+            }
+            // Fall back to JSON comparison
+            if func_call.args.len() >= 2 {
+                let list_val = expr_to_json_value(&func_call.args[0]);
+                let needle = expr_to_json_value(&func_call.args[1]);
+                if let serde_json::Value::Array(arr) = list_val {
+                    return Some(arr.contains(&needle).to_string());
+                }
+            }
+            None
+        }
+        "element" => {
+            // element(list, index) → element at index (wraps around)
+            if let (Some(list_str), Some(idx_str)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                if let (Ok(arr), Ok(idx)) = (
+                    serde_json::from_str::<Vec<String>>(&list_str),
+                    idx_str.parse::<usize>(),
+                ) {
+                    if !arr.is_empty() {
+                        return Some(arr[idx % arr.len()].clone());
+                    }
+                }
+            }
+            None
+        }
+        "keys" => {
+            // keys(map) → sorted list of keys
+            if let Some(arg) = func_call.args.first() {
+                if let Some(s) = expr_to_string(arg) {
+                    if let Ok(obj) =
+                        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s)
+                    {
+                        let mut k: Vec<String> = obj.keys().cloned().collect();
+                        k.sort();
+                        return serde_json::to_string(&k).ok();
+                    }
+                }
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Object(obj) = val {
+                    let mut k: Vec<String> = obj.keys().cloned().collect();
+                    k.sort();
+                    serde_json::to_string(&k).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "values" => {
+            // values(map) → list of values (sorted by key)
+            if let Some(arg) = func_call.args.first() {
+                if let Some(s) = expr_to_string(arg) {
+                    if let Ok(obj) =
+                        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s)
+                    {
+                        let mut pairs: Vec<_> = obj.into_iter().collect();
+                        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                        let vals: Vec<_> = pairs.into_iter().map(|(_, v)| v).collect();
+                        return serde_json::to_string(&vals).ok();
+                    }
+                }
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Object(obj) = val {
+                    let mut pairs: Vec<_> = obj.into_iter().collect();
+                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                    let vals: Vec<_> = pairs.into_iter().map(|(_, v)| v).collect();
+                    serde_json::to_string(&vals).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "zipmap" => {
+            // zipmap(keys, values) → map
+            if func_call.args.len() >= 2 {
+                let keys_val = expr_to_json_value(&func_call.args[0]);
+                let vals_val = expr_to_json_value(&func_call.args[1]);
+                if let (serde_json::Value::Array(keys), serde_json::Value::Array(vals)) =
+                    (keys_val, vals_val)
+                {
+                    let mut map = serde_json::Map::new();
+                    for (k, v) in keys.into_iter().zip(vals.into_iter()) {
+                        if let serde_json::Value::String(key) = k {
+                            map.insert(key, v);
+                        }
+                    }
+                    serde_json::to_string(&serde_json::Value::Object(map)).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "try" => {
+            // try(expr, fallback...) — return first resolvable
+            for arg in &func_call.args {
+                if let Some(val) = expr_to_string(arg) {
+                    return Some(val);
+                }
+            }
+            None
+        }
+        "tonumber" => {
+            // tonumber(value) → number string
+            func_call
+                .args
+                .first()
+                .and_then(expr_to_string)
+                .and_then(|s| {
+                    // Validate it's actually a number
+                    if s.parse::<f64>().is_ok() {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                })
+        }
+        "tobool" => {
+            // tobool(value) → "true"/"false"
+            func_call
+                .args
+                .first()
+                .and_then(expr_to_string)
+                .map(|s| match s.as_str() {
+                    "true" | "1" => "true".to_string(),
+                    "false" | "0" => "false".to_string(),
+                    _ => s,
+                })
+        }
+        "tomap" => {
+            // tomap(value) → pass through (we already represent maps as JSON objects)
+            if let Some(arg) = func_call.args.first() {
+                let val = expr_to_json_value(arg);
+                serde_json::to_string(&val).ok()
+            } else {
+                None
+            }
+        }
+        "abs" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|n| {
+                let a = n.abs();
+                if a == a.floor() {
+                    format!("{}", a as i64)
+                } else {
+                    format!("{}", a)
+                }
+            }),
+        "ceil" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|n| format!("{}", n.ceil() as i64)),
+        "floor" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|n| format!("{}", n.floor() as i64)),
+        "max" => {
+            let mut vals: Vec<f64> = Vec::new();
+            for arg in &func_call.args {
+                if let Some(s) = expr_to_string(arg) {
+                    if let Ok(n) = s.parse::<f64>() {
+                        vals.push(n);
+                    }
+                }
+            }
+            vals.into_iter().reduce(f64::max).map(|n| {
+                if n == n.floor() {
+                    format!("{}", n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            })
+        }
+        "min" => {
+            let mut vals: Vec<f64> = Vec::new();
+            for arg in &func_call.args {
+                if let Some(s) = expr_to_string(arg) {
+                    if let Ok(n) = s.parse::<f64>() {
+                        vals.push(n);
+                    }
+                }
+            }
+            vals.into_iter().reduce(f64::min).map(|n| {
+                if n == n.floor() {
+                    format!("{}", n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            })
+        }
+        "parseint" => {
+            // parseint(string, base)
+            if let (Some(s), Some(base_str)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                let base = base_str.parse::<u32>().ok()?;
+                i64::from_str_radix(&s, base).ok().map(|n| n.to_string())
+            } else {
+                None
+            }
+        }
+        "signum" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|n| {
+                if n > 0.0 {
+                    "1".to_string()
+                } else if n < 0.0 {
+                    "-1".to_string()
+                } else {
+                    "0".to_string()
+                }
+            }),
+        "base64encode" => func_call.args.first().and_then(expr_to_string).map(|s| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
+        }),
+        "base64decode" => func_call
+            .args
+            .first()
+            .and_then(expr_to_string)
+            .and_then(|s| {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(s.as_bytes())
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+            }),
+        "md5" => func_call.args.first().and_then(expr_to_string).map(|s| {
+            use md5::{Digest, Md5};
+            let mut hasher = Md5::new();
+            hasher.update(s.as_bytes());
+            format!("{:x}", hasher.finalize())
+        }),
+        "indent" => {
+            // indent(num_spaces, string) — adds indentation to all lines except the first
+            if let (Some(spaces_str), Some(s)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                let spaces = spaces_str.parse::<usize>().unwrap_or(0);
+                let indent = " ".repeat(spaces);
+                let lines: Vec<&str> = s.split('\n').collect();
+                if lines.len() <= 1 {
+                    Some(s)
+                } else {
+                    let mut result = lines[0].to_string();
+                    for line in &lines[1..] {
+                        result.push('\n');
+                        if !line.is_empty() {
+                            result.push_str(&indent);
+                        }
+                        result.push_str(line);
+                    }
+                    Some(result)
+                }
+            } else {
+                None
+            }
+        }
+        "sum" => {
+            // sum(list) → sum of numbers
+            if let Some(arg) = func_call.args.first() {
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Array(arr) = val {
+                    let total: f64 = arr
+                        .iter()
+                        .filter_map(|v| match v {
+                            serde_json::Value::Number(n) => n.as_f64(),
+                            serde_json::Value::String(s) => s.parse::<f64>().ok(),
+                            _ => None,
+                        })
+                        .sum();
+                    if total == total.floor() {
+                        Some(format!("{}", total as i64))
+                    } else {
+                        Some(format!("{}", total))
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "alltrue" => {
+            // alltrue(list) → "true" if all elements are true
+            if let Some(arg) = func_call.args.first() {
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Array(arr) = val {
+                    let result = arr.iter().all(|v| match v {
+                        serde_json::Value::Bool(b) => *b,
+                        serde_json::Value::String(s) => s == "true",
+                        _ => false,
+                    });
+                    Some(result.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "anytrue" => {
+            // anytrue(list) → "true" if any element is true
+            if let Some(arg) = func_call.args.first() {
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Array(arr) = val {
+                    let result = arr.iter().any(|v| match v {
+                        serde_json::Value::Bool(b) => *b,
+                        serde_json::Value::String(s) => s == "true",
+                        _ => false,
+                    });
+                    Some(result.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "one" => {
+            // one(list) → single element if list has exactly one
+            if let Some(arg) = func_call.args.first() {
+                let val = expr_to_json_value(arg);
+                if let serde_json::Value::Array(arr) = val {
+                    if arr.len() == 1 {
+                        match &arr[0] {
+                            serde_json::Value::String(s) => Some(s.clone()),
+                            other => serde_json::to_string(other).ok(),
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "range" => {
+            // range(start, limit) or range(limit)
+            let (start, limit) = if func_call.args.len() >= 2 {
+                (
+                    func_call
+                        .args
+                        .first()
+                        .and_then(expr_to_string)
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0),
+                    func_call
+                        .args
+                        .get(1)
+                        .and_then(expr_to_string)
+                        .and_then(|s| s.parse::<i64>().ok())?,
+                )
+            } else {
+                (
+                    0,
+                    func_call
+                        .args
+                        .first()
+                        .and_then(expr_to_string)
+                        .and_then(|s| s.parse::<i64>().ok())?,
+                )
+            };
+            let nums: Vec<i64> = (start..limit).collect();
+            serde_json::to_string(&nums).ok()
+        }
+        "jsondecode" => {
+            // jsondecode(string) → pass through the JSON string (already a string)
+            func_call.args.first().and_then(expr_to_string)
+        }
+        "timestamp" => {
+            // timestamp() → current UTC time in RFC 3339 format
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            Some(format_rfc3339(now))
+        }
+        "uuid" => {
+            // uuid() → random UUID v4
+            Some(uuid::Uuid::new_v4().to_string())
+        }
+        "formatdate" => {
+            // formatdate(spec, timestamp) → formatted date string
+            // Best effort: handles common Go time format specifiers used by Terraform
+            if let (Some(spec), Some(ts)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                format_date_terraform(&spec, &ts)
+            } else {
+                None
+            }
+        }
+        "file" => {
+            // file(path) → read file contents as string
+            // Resolves relative to the Terraform project directory
+            if let Some(path_str) = func_call.args.first().and_then(expr_to_string) {
+                // Best-effort: try reading the file, return None if it doesn't exist
+                fs::read_to_string(&path_str).ok().or_else(|| {
+                    // Try common relative paths (e.g., "${path.module}/file.json")
+                    // Strip ${path.module}/ prefix if present
+                    let cleaned = path_str
+                        .replace("${path.module}/", "")
+                        .replace("${path.root}/", "");
+                    fs::read_to_string(&cleaned).ok()
+                })
+            } else {
+                None
+            }
+        }
+        "regex" => {
+            // regex(pattern, string) → first match or None
+            if let (Some(pattern), Some(s)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                regex::Regex::new(&pattern)
+                    .ok()
+                    .and_then(|re| re.find(&s).map(|m| m.as_str().to_string()))
+            } else {
+                None
+            }
+        }
+        "regexall" => {
+            // regexall(pattern, string) → JSON array of all matches
+            if let (Some(pattern), Some(s)) = (
+                func_call.args.first().and_then(expr_to_string),
+                func_call.args.get(1).and_then(expr_to_string),
+            ) {
+                regex::Regex::new(&pattern).ok().and_then(|re| {
+                    let matches: Vec<String> =
+                        re.find_iter(&s).map(|m| m.as_str().to_string()).collect();
+                    serde_json::to_string(&matches).ok()
+                })
+            } else {
+                None
+            }
+        }
+        "can" => {
+            // can(expression) → "true" if expression evaluates without error
+            // Best effort: try to evaluate the argument
+            func_call.args.first().map(|arg| {
+                if expr_to_string(arg).is_some() {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            })
+        }
+        "pathexpand" => {
+            // pathexpand(path) → expand ~ to home directory
+            func_call.args.first().and_then(expr_to_string).map(|s| {
+                if s.starts_with("~/") {
+                    if let Ok(home) = std::env::var("HOME") {
+                        return format!("{}{}", home, &s[1..]);
+                    }
+                }
+                s
+            })
+        }
+        "basename" => {
+            // basename(path) → filename component
+            func_call.args.first().and_then(expr_to_string).map(|s| {
+                Path::new(&s)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&s)
+                    .to_string()
+            })
+        }
+        "dirname" => {
+            // dirname(path) → directory component
+            func_call.args.first().and_then(expr_to_string).map(|s| {
+                Path::new(&s)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or(".")
+                    .to_string()
+            })
+        }
         _ => None, // Unknown function — can't resolve
+    }
+}
+
+/// Format epoch seconds as RFC 3339 UTC timestamp (e.g., "2026-03-24T08:00:00Z")
+fn format_rfc3339(epoch_secs: u64) -> String {
+    let days = epoch_secs / 86400;
+    let time_of_day = epoch_secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Convert days since epoch to year-month-day
+    let (year, month, day) = days_to_ymd(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+/// Convert days since Unix epoch to (year, month, day)
+fn days_to_ymd(days: u64) -> (i64, u64, u64) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Best-effort Terraform formatdate() implementation
+/// Handles common Go time format specifiers: YYYY, YY, MM, DD, hh, mm, ss, EEEE, EEE, Z, ZZZ
+fn format_date_terraform(spec: &str, timestamp: &str) -> Option<String> {
+    // Parse RFC 3339 timestamp (e.g., "2026-03-24T08:00:00Z")
+    let ts = timestamp.trim_matches('"');
+    // Extract parts: YYYY-MM-DDThh:mm:ssZ
+    let parts: Vec<&str> = ts.split('T').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let date_parts: Vec<&str> = parts[0].split('-').collect();
+    if date_parts.len() != 3 {
+        return None;
+    }
+    let year: u32 = date_parts[0].parse().ok()?;
+    let month: u32 = date_parts[1].parse().ok()?;
+    let day: u32 = date_parts[2].parse().ok()?;
+
+    let time_str = parts[1].trim_end_matches('Z');
+    let time_parts: Vec<&str> = time_str.split(':').collect();
+    let hour: u32 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minute: u32 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let second: u32 = time_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let month_names = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let month_abbrev = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let day_names = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ];
+    let day_abbrev = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    // Day of week calculation (Zeller-ish / Tomohiko Sakamoto)
+    let dow = day_of_week(year, month, day);
+
+    let result = spec
+        .replace("YYYY", &format!("{:04}", year))
+        .replace("YY", &format!("{:02}", year % 100))
+        .replace("MMMM", month_names.get((month - 1) as usize).unwrap_or(&""))
+        .replace("MMM", month_abbrev.get((month - 1) as usize).unwrap_or(&""))
+        .replace("MM", &format!("{:02}", month))
+        .replace("DD", &format!("{:02}", day))
+        .replace("hh", &format!("{:02}", hour))
+        .replace("mm", &format!("{:02}", minute))
+        .replace("ss", &format!("{:02}", second))
+        .replace("EEEE", day_names.get(dow).unwrap_or(&""))
+        .replace("EEE", day_abbrev.get(dow).unwrap_or(&""))
+        .replace("ZZZ", "UTC");
+
+    Some(result)
+}
+
+/// Day of week: 0=Monday, 1=Tuesday, ..., 6=Sunday (ISO 8601)
+fn day_of_week(year: u32, month: u32, day: u32) -> usize {
+    // Tomohiko Sakamoto's algorithm (modified for Monday=0)
+    let t = [0u32, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if month < 3 { year - 1 } else { year };
+    let dow = (y + y / 4 - y / 100 + y / 400 + t[(month - 1) as usize] + day) % 7;
+    // Sakamoto gives 0=Sunday, convert to 0=Monday
+    if dow == 0 {
+        6
+    } else {
+        (dow - 1) as usize
     }
 }
 
@@ -5109,5 +5971,213 @@ resource "aws_lambda_function" "test" {
         assert_eq!(func.environment.get("B"), Some(&"2".to_string())); // overridden by extra
         assert_eq!(func.environment.get("C"), Some(&"3".to_string())); // overridden by inline
         assert_eq!(func.environment.get("D"), Some(&"3".to_string()));
+    }
+
+    // ===== New function tests (timestamp, uuid, formatdate, file, regex, etc.) =====
+
+    #[test]
+    fn test_timestamp_function() {
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "timestamp".into(),
+            args: vec![],
+            expand_final: false,
+        }
+        .into();
+        let result = expr_to_string(&expr).unwrap();
+        // Should be RFC 3339 format: YYYY-MM-DDThh:mm:ssZ
+        assert!(
+            result.ends_with('Z'),
+            "timestamp should end with Z: {}",
+            result
+        );
+        assert_eq!(result.len(), 20, "RFC 3339 should be 20 chars: {}", result);
+        assert!(
+            result.contains('T'),
+            "should contain T separator: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_uuid_function() {
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "uuid".into(),
+            args: vec![],
+            expand_final: false,
+        }
+        .into();
+        let result = expr_to_string(&expr).unwrap();
+        // UUID v4 format: 8-4-4-4-12 hex chars
+        assert_eq!(result.len(), 36, "UUID should be 36 chars: {}", result);
+        let parts: Vec<&str> = result.split('-').collect();
+        assert_eq!(parts.len(), 5, "UUID should have 5 dash-separated parts");
+        // Two consecutive calls should produce different UUIDs
+        let result2 = expr_to_string(&expr).unwrap();
+        assert_ne!(result, result2, "UUIDs should be unique");
+    }
+
+    #[test]
+    fn test_formatdate_basic() {
+        let result = format_date_terraform("YYYY-MM-DD", "2026-03-24T08:30:00Z");
+        assert_eq!(result, Some("2026-03-24".to_string()));
+    }
+
+    #[test]
+    fn test_formatdate_full() {
+        let result = format_date_terraform("YYYY-MM-DDThh:mm:ssZ", "2026-01-15T14:30:45Z");
+        assert_eq!(result, Some("2026-01-15T14:30:45Z".to_string()));
+    }
+
+    #[test]
+    fn test_formatdate_day_of_week() {
+        // 2026-03-24 is a Tuesday
+        let result = format_date_terraform("EEEE", "2026-03-24T00:00:00Z");
+        assert_eq!(result, Some("Tuesday".to_string()));
+    }
+
+    #[test]
+    fn test_formatdate_month_name() {
+        let result = format_date_terraform("DD MMMM YYYY", "2026-12-25T00:00:00Z");
+        assert_eq!(result, Some("25 December 2026".to_string()));
+    }
+
+    #[test]
+    fn test_days_to_ymd() {
+        // Unix epoch = Jan 1, 1970
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+        // 2026-03-24 = day 20536 since epoch (2026-01-01 = 20454, + 31 + 28 + 24 - 1 = 20536)
+        let (y, m, d) = days_to_ymd(20536);
+        assert_eq!((y, m, d), (2026, 3, 24));
+    }
+
+    #[test]
+    fn test_day_of_week() {
+        // Known: 2026-03-24 is Tuesday (1 in our 0=Monday system)
+        assert_eq!(day_of_week(2026, 3, 24), 1); // Tuesday
+                                                 // 2026-01-01 is Thursday
+        assert_eq!(day_of_week(2026, 1, 1), 3); // Thursday
+    }
+
+    #[test]
+    fn test_regex_function() {
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "regex".into(),
+            args: vec![
+                hcl::Expression::String("[0-9]+".into()),
+                hcl::Expression::String("hello 42 world".into()),
+            ],
+            expand_final: false,
+        }
+        .into();
+        assert_eq!(expr_to_string(&expr), Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_regexall_function() {
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "regexall".into(),
+            args: vec![
+                hcl::Expression::String("[0-9]+".into()),
+                hcl::Expression::String("a1 b2 c3".into()),
+            ],
+            expand_final: false,
+        }
+        .into();
+        let result = expr_to_string(&expr).unwrap();
+        let arr: Vec<String> = serde_json::from_str(&result).unwrap();
+        assert_eq!(arr, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn test_can_function() {
+        // can() with a resolvable expression → "true"
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "can".into(),
+            args: vec![hcl::Expression::String("hello".into())],
+            expand_final: false,
+        }
+        .into();
+        assert_eq!(expr_to_string(&expr), Some("true".to_string()));
+    }
+
+    #[test]
+    fn test_basename_function() {
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "basename".into(),
+            args: vec![hcl::Expression::String("/path/to/file.txt".into())],
+            expand_final: false,
+        }
+        .into();
+        assert_eq!(expr_to_string(&expr), Some("file.txt".to_string()));
+    }
+
+    #[test]
+    fn test_dirname_function() {
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "dirname".into(),
+            args: vec![hcl::Expression::String("/path/to/file.txt".into())],
+            expand_final: false,
+        }
+        .into();
+        assert_eq!(expr_to_string(&expr), Some("/path/to".to_string()));
+    }
+
+    #[test]
+    fn test_file_function_reads_real_file() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"Version": "2012-10-17", "Statement": []}"#;
+        std::fs::write(dir.path().join("policy.json"), content).unwrap();
+
+        let path = dir.path().join("policy.json").to_str().unwrap().to_string();
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "file".into(),
+            args: vec![hcl::Expression::String(path.into())],
+            expand_final: false,
+        }
+        .into();
+        assert_eq!(expr_to_string(&expr), Some(content.to_string()));
+    }
+
+    #[test]
+    fn test_pathexpand_function() {
+        let expr: hcl::Expression = hcl::expr::FuncCall {
+            name: "pathexpand".into(),
+            args: vec![hcl::Expression::String("/absolute/path".into())],
+            expand_final: false,
+        }
+        .into();
+        // Non-~ paths should pass through unchanged
+        assert_eq!(expr_to_string(&expr), Some("/absolute/path".to_string()));
+    }
+
+    #[test]
+    fn test_formatdate_in_locals() {
+        // Test formatdate used in locals → Lambda env var
+        let dir = TempDir::new().unwrap();
+        let tf = r#"
+locals {
+  deploy_date = formatdate("YYYY-MM-DD", "2026-03-24T08:00:00Z")
+}
+
+resource "aws_lambda_function" "test" {
+  function_name = "test-func"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  role          = "arn:aws:iam::123:role/test"
+
+  environment {
+    variables = {
+      DEPLOY_DATE = local.deploy_date
+    }
+  }
+}
+"#;
+        std::fs::write(dir.path().join("main.tf"), tf).unwrap();
+        let config = parse_terraform_dir(dir.path()).unwrap();
+        let func = &config.functions[0];
+        assert_eq!(
+            func.environment.get("DEPLOY_DATE"),
+            Some(&"2026-03-24".to_string())
+        );
     }
 }
